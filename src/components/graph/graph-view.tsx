@@ -232,6 +232,7 @@ function GraphLoader({
             color,
             size,
             weight: edge.weight,
+            relation: edge.relation ?? "",
             label: relationLabel,
             curvature: 0.25,
           })
@@ -1514,17 +1515,27 @@ export function GraphView() {
                     }
                     return result
                   },
-                  edgeReducer: (_edge, attrs) => {
+                  edgeReducer: (edge, attrs) => {
                     const result = { ...attrs }
                     if (attrs.dimmed) {
                       result.color = mixColor(edgeColorHex, "#e2e8f0", 0.75)
                       result.size = 0.3
                     }
                     if (attrs.highlighted) {
-                      const w = attrs.weight ?? 1
                       result.color = "#1e293b"
                       result.size = Math.max(2, (attrs.size ?? 1) * 1.5)
-                      result.label = t("graph.nodeRelevanceLabel", { value: w.toFixed(1) })
+                      // 显示关系描述而非相关度数字
+                      const relation = attrs.relation as string | undefined
+                      if (relation) {
+                        const relationLabel = NOVEL_RELATION_LABELS[relation as keyof typeof NOVEL_RELATION_LABELS] ?? relation
+                        result.label = relationLabel
+                      } else {
+                        // 从 edge key (source->target) 提取节点名显示关系
+                        const parts = edge.split("->")
+                        if (parts.length === 2) {
+                          result.label = `${parts[0]} \u2194 ${parts[1]}`
+                        }
+                      }
                       result.forceLabel = true
                     }
                     return result
