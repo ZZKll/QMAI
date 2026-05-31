@@ -677,15 +677,18 @@ async function readSkillFileWithFallback(filePath: string, projectPath?: string)
         try {
           const exeDir = await getExecutableDir()
           roots.push(exeDir)
-          // 也尝试 exe 上级目录（便携版场景）
-          const parentDir = exeDir.replace(/[/\\][^/\\]+[/\\]?$/, "")
-          if (parentDir !== exeDir) roots.push(parentDir)
+          // 便携版：NvwaSKILL 直接在 exe 旁边
+          // 安装版：NvwaSKILL 在 exe 目录下的 _up_ 子目录中
+          roots.push(joinPath(exeDir, "_up_"))
+          // 也尝试 exe 的上一级目录
+          const parentDir = exeDir.replace(/[\\/][^\\/]+[\\/]?$/, "")
+          if (parentDir && parentDir !== exeDir) roots.push(parentDir)
         } catch {}
         try {
           const resDir = await getResourceDir()
           roots.push(resDir)
-          // Tauri NSIS 安装有时会加 _up_ 前缀
-          roots.push(resDir.replace(/[/\\]$/, "") + "/_up_")
+          // Tauri NSIS 安装版把 ../NvwaSKILL 放到 _up_/NvwaSKILL
+          roots.push(joinPath(resDir, "_up_"))
         } catch {}
       } catch {}
 
@@ -694,6 +697,7 @@ async function readSkillFileWithFallback(filePath: string, projectPath?: string)
         try {
           const resDir = await resourceDir()
           roots.push(resDir)
+          roots.push(joinPath(resDir, "_up_"))
         } catch {}
       } catch {}
     }
