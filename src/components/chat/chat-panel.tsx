@@ -127,7 +127,6 @@ export function ChatPanel() {
   const finalizeStream = useChatStore((s) => s.finalizeStream)
   const createConversation = useChatStore((s) => s.createConversation)
   const removeLastAssistantMessage = useChatStore((s) => s.removeLastAssistantMessage)
-  const markLastAssistantDiscarded = useChatStore((s) => s.markLastAssistantDiscarded)
   const maxHistoryMessages = useChatStore((s) => s.maxHistoryMessages)
 
   // Derive active messages via selector to re-render on message changes
@@ -200,6 +199,10 @@ export function ChatPanel() {
       const tree = await listDirectory(pp)
       useWikiStore.getState().setFileTree(tree)
       useWikiStore.getState().bumpDataVersion()
+
+      // 自动跳转到刚保存的章节
+      useWikiStore.getState().setActiveView("wiki")
+      useWikiStore.getState().setSelectedFile(chapterPath)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setChapterSaveStatus(t("chat.saveFailed", { message }))
@@ -631,14 +634,8 @@ export function ChatPanel() {
     }
   }, [project, llmConfig, setFileTree])
 
-  const handleDiscardDraft = useCallback(() => {
-    markLastAssistantDiscarded()
-    console.log("[novel] draft discarded — this action is irreversible")
-  }, [markLastAssistantDiscarded])
-
   const hasAssistantMessages = activeMessages.some((m) => m.role === "assistant")
   const showWriteButton = mode === "ingest" && !isStreaming && hasAssistantMessages
-  const showDiscardButton = novelMode && !isStreaming && hasAssistantMessages
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -683,19 +680,6 @@ export function ChatPanel() {
               </div>
             </div>
 
-            {showDiscardButton && (
-              <div className="border-t px-3 py-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleDiscardDraft}
-                  className="w-full gap-2 text-muted-foreground hover:text-destructive"
-                >
-                  <Trash2 className="h-4 w-4" />
-                  {t("novel.chat.discardDraft")}
-                </Button>
-              </div>
-            )}
             {showWriteButton && (
               <div className="border-t px-3 py-2">
                 <Button

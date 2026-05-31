@@ -37,7 +37,7 @@ interface ChatMessageProps {
   isSaving?: boolean
 }
 
-export function ChatMessage({ message, isLastAssistant, onRegenerate, novelMode, onSaveAsChapter, onSaveAsDraft, onDiscardDraft, saveStatus, isSaving }: ChatMessageProps) {
+export function ChatMessage({ message, isLastAssistant, onRegenerate, novelMode, onSaveAsChapter, saveStatus, isSaving }: ChatMessageProps) {
   const isUser = message.role === "user"
   const isSystem = message.role === "system"
   const isAssistant = message.role === "assistant"
@@ -88,27 +88,7 @@ export function ChatMessage({ message, isLastAssistant, onRegenerate, novelMode,
                 disabled={isSaving}
                 className="rounded border border-border px-2 py-0.5 text-[11px] text-foreground hover:bg-accent disabled:opacity-50"
               >
-                {isSaving ? "保存中..." : "保存为正式章节"}
-              </button>
-            )}
-            {novelMode && isLastAssistant && onSaveAsDraft && (
-              <button
-                type="button"
-                onClick={() => onSaveAsDraft(message.content)}
-                disabled={isSaving}
-                className="rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent disabled:opacity-50"
-              >
-                保存为草稿
-              </button>
-            )}
-            {novelMode && isLastAssistant && onDiscardDraft && (
-              <button
-                type="button"
-                onClick={onDiscardDraft}
-                disabled={isSaving}
-                className="rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:text-destructive disabled:opacity-50"
-              >
-                废弃
+                {isSaving ? "保存中..." : "保存到章节库"}
               </button>
             )}
             {(hovered || (novelMode && isLastAssistant)) && (

@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react"
-import { Send, X, Save } from "lucide-react"
+import { Send, X, Save, Copy, RefreshCw, FileText } from "lucide-react"
 import { useWikiStore } from "@/stores/wiki-store"
 import { normalizePath } from "@/lib/path-utils"
 import { readFile, writeFile, listDirectory, createDirectory, fileExists } from "@/commands/fs"
@@ -12,9 +12,10 @@ interface OutlineChatMessage {
   content: string
 }
 
-async function loadOutlineContext(projectPath: string): Promise<string> {
+async function loadOutlineContext(projectPath: string): Promise<{ context: string; sources: string[] }> {
   const pp = normalizePath(projectPath)
   const sections: string[] = []
+  const sources: string[] = []
 
   // 读取大纲目录内容
   try {
@@ -26,6 +27,7 @@ async function loadOutlineContext(projectPath: string): Promise<string> {
           const content = await readFile(`${outlinesDir}/${file.name}`)
           const trimmed = content.length > 3000 ? content.slice(0, 3000) + "\n...(已截断)" : content
           sections.push(`【${file.name.replace(/\.md$/, "")}】\n${trimmed}`)
+          sources.push(`大纲: ${file.name.replace(/\.md$/, "")}`)
         } catch { /* skip */ }
       }
     }
@@ -41,11 +43,12 @@ async function loadOutlineContext(projectPath: string): Promise<string> {
         const content = await readFile(`${chaptersDir}/${file.name}`)
         const preview = content.length > 1500 ? content.slice(0, 1500) + "\n...(已截断)" : content
         sections.push(`【章节:${file.name.replace(/\.md$/, "")}】\n${preview}`)
+        sources.push(`章节: ${file.name.replace(/\.md$/, "")}`)
       } catch { /* skip */ }
     }
   } catch { /* no chapters dir */ }
 
-  return sections.join("\n\n---\n\n")
+  return { context: sections.join("\n\n---\n\n"), sources }
 }
 
 async function generateOutlineTitle(content: string): Promise<string> {
@@ -80,9 +83,12 @@ export function OutlineChatPanel({ onClose }: { onClose: () => void }) {
   const [streaming, setStreaming] = useState(false)
   const [streamContent, setStreamContent] = useState("")
   const [saveStatus, setSaveStatus] = useState("")
+  const [lastSources, setLastSources] = useState<string[]>([])
+  const [copied, setCopied] = useState<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const userScrolledUpRef = useRef(false)
   const abortRef = useRef<AbortController | null>(null)
+  const lastUserInputRef = useRef("")
 
   // Auto-scroll with user override
   useEffect(() => {
@@ -109,13 +115,15 @@ export function OutlineChatPanel({ onClose }: { onClose: () => void }) {
     const userMsg: OutlineChatMessage = { role: "user", content: input.trim() }
     const updatedMessages = [...messages, userMsg]
     setMessages(updatedMessages)
+    lastUserInputRef.current = input.trim()
     setInput("")
     setStreaming(true)
     setStreamContent("")
     userScrolledUpRef.current = false
 
     try {
-      const context = await loadOutlineContext(project.path)
+      const { context, sources } = await loadOutlineContext(project.path)
+      setLastSources(sources)
       const systemPrompt = `你是一个专业的小说大纲编辑助手。以下是当前小说的大纲和章节内容，请根据用户的问题进行大纲相关的讨论和创作。
 
 ${context}`
@@ -147,6 +155,59 @@ ${context}`
       abortRef.current = null
     }
   }, [input, project, streaming, llmConfig, messages])
+
+  const handleRegenerate = useCallback(async (msgIndex: number) => {
+    if (!project || streaming) return
+    if (!hasUsableLlm(llmConfig)) return
+
+    // Remove the last assistant message and resend
+    const targetMessages = messages.slice(0, msgIndex)
+    setMessages(targetMessages)
+    setStreaming(true)
+    setStreamContent("")
+    userScrolledUpRef.current = false
+
+    try {
+      const { context, sources } = await loadOutlineContext(project.path)
+      setLastSources(sources)
+      const systemPrompt = `你是一个专业的小说大纲编辑助手。以下是当前小说的大纲和章节内容，请根据用户的问题进行大纲相关的讨论和创作。
+
+${context}`
+
+      const chatMessages: ChatMessage[] = [
+        { role: "system", content: systemPrompt },
+        ...targetMessages.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
+      ]
+
+      let result = ""
+      const controller = new AbortController()
+      abortRef.current = controller
+
+      await streamChat(llmConfig, chatMessages, {
+        onToken: (token) => {
+          result += token
+          setStreamContent(result)
+        },
+        onDone: () => {},
+        onError: () => {},
+      }, controller.signal)
+
+      setMessages([...targetMessages, { role: "assistant", content: result }])
+      setStreamContent("")
+    } catch {
+      // ignore
+    } finally {
+      setStreaming(false)
+      abortRef.current = null
+    }
+  }, [project, streaming, llmConfig, messages])
+
+  const handleCopy = useCallback((content: string, index: number) => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(index)
+      setTimeout(() => setCopied(null), 2000)
+    }).catch(() => {})
+  }, [])
 
   const handleSaveAsOutline = useCallback(async (content: string) => {
     if (!project) return
@@ -201,6 +262,21 @@ ${context}`
                   <div className="prose prose-sm dark:prose-invert max-w-none">
                     <ReactMarkdown>{msg.content}</ReactMarkdown>
                   </div>
+                  {/* 引用资料 */}
+                  {lastSources.length > 0 && i === messages.length - 1 ? (
+                    <details className="mt-2 border-t pt-2">
+                      <summary className="flex cursor-pointer items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+                        <FileText className="h-3 w-3" />
+                        引用资料（{lastSources.length}）
+                      </summary>
+                      <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+                        {lastSources.map((src, si) => (
+                          <li key={si}>• {src}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  ) : null}
+                  {/* 操作按钮 */}
                   <div className="mt-2 flex gap-2 border-t pt-2">
                     <button
                       onClick={() => void handleSaveAsOutline(msg.content)}
@@ -208,6 +284,21 @@ ${context}`
                     >
                       <Save className="h-3 w-3" />
                       保存为大纲
+                    </button>
+                    <button
+                      onClick={() => handleCopy(msg.content, i)}
+                      className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs hover:bg-accent"
+                    >
+                      <Copy className="h-3 w-3" />
+                      {copied === i ? "已复制" : "复制"}
+                    </button>
+                    <button
+                      onClick={() => void handleRegenerate(i)}
+                      disabled={streaming}
+                      className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs hover:bg-accent disabled:opacity-50"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      重新生成
                     </button>
                   </div>
                 </>
