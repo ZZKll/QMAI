@@ -81,6 +81,12 @@ export interface ChapterSnapshot {
   endingHook: string
   graphNodes: string[]
   graphEdges: string[]
+  sourceType?: "chapter" | "outline"
+  sourceSequence?: number
+  revision?: number
+  snapshotId?: string
+  supersedes?: string
+  isHistorical?: boolean
   entityIsNew?: Record<string, boolean>
   validationWarnings?: ValidationWarning[]
   memorySyncedAt?: string
@@ -95,6 +101,12 @@ function normalizeSnapshotText(value: unknown): string {
   if (typeof value === "string") return value
   if (typeof value === "number" || typeof value === "boolean") return String(value)
   return ""
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  const parsed = parseChapterNumber(value)
+  if (typeof parsed !== "number" || !Number.isFinite(parsed) || parsed <= 0) return undefined
+  return parsed
 }
 
 function normalizeSnapshotList(value: unknown): string[] {
@@ -181,6 +193,12 @@ function normalizeChapterSnapshot(
     endingHook: normalizeSnapshotText(raw.endingHook),
     graphNodes: normalizeSnapshotList(raw.graphNodes),
     graphEdges: normalizeSnapshotList(raw.graphEdges),
+    sourceType: raw.sourceType === "chapter" || raw.sourceType === "outline" ? raw.sourceType : undefined,
+    sourceSequence: normalizePositiveInteger(raw.sourceSequence),
+    revision: normalizePositiveInteger(raw.revision),
+    snapshotId: normalizeSnapshotText(raw.snapshotId) || undefined,
+    supersedes: normalizeSnapshotText(raw.supersedes) || undefined,
+    isHistorical: typeof raw.isHistorical === "boolean" ? raw.isHistorical : undefined,
     entityIsNew: normalizeEntityFlags(raw.entityIsNew),
     validationWarnings: normalizeValidationWarnings(raw.validationWarnings),
     memorySyncedAt: normalizeSnapshotText(raw.memorySyncedAt) || undefined,
@@ -190,6 +208,80 @@ function normalizeChapterSnapshot(
     itemDetails: normalizeSnapshotDetailRecord<ItemDetail>(raw.itemDetails),
     eventDetails: normalizeSnapshotDetailRecord<EventDetail>(raw.eventDetails),
   }
+}
+
+function inferSnapshotSourceType(snapshot: Pick<ChapterSnapshot, "chapterNumber">): "chapter" | "outline" {
+  return snapshot.chapterNumber < 0 ? "outline" : "chapter"
+}
+
+function inferSnapshotSourceSequence(snapshot: Pick<ChapterSnapshot, "chapterNumber">): number {
+  return Math.abs(snapshot.chapterNumber)
+}
+
+function buildSnapshotRevisionId(snapshot: Pick<ChapterSnapshot, "chapterId">, revision: number): string {
+  return `${snapshot.chapterId}-r${revision}`
+}
+
+function ensureSnapshotIdentity(
+  snapshot: ChapterSnapshot,
+  overrides: Partial<Pick<ChapterSnapshot, "sourceType" | "sourceSequence" | "revision" | "snapshotId" | "supersedes" | "isHistorical">> = {},
+): ChapterSnapshot {
+  const sourceType = overrides.sourceType ?? snapshot.sourceType ?? inferSnapshotSourceType(snapshot)
+  const sourceSequence = overrides.sourceSequence ?? snapshot.sourceSequence ?? inferSnapshotSourceSequence(snapshot)
+  const revision = overrides.revision ?? snapshot.revision ?? 1
+  const snapshotId = overrides.snapshotId ?? snapshot.snapshotId ?? buildSnapshotRevisionId(snapshot, revision)
+
+  return {
+    ...snapshot,
+    sourceType,
+    sourceSequence,
+    revision,
+    snapshotId,
+    supersedes: overrides.supersedes ?? snapshot.supersedes,
+    isHistorical: overrides.isHistorical ?? snapshot.isHistorical ?? false,
+  }
+}
+
+async function readCurrentSnapshot(projectPath: string, chapterNumber: number): Promise<ChapterSnapshot | null> {
+  try {
+    const raw = await readFile(snapshotJsonPath(projectPath, chapterNumber))
+    const parsed = normalizeChapterSnapshot(JSON.parse(raw), {
+      chapterId: `chapter-${chapterNumber}`,
+      chapterNumber,
+    })
+    return parsed ? ensureSnapshotIdentity(parsed) : null
+  } catch {
+    return null
+  }
+}
+
+function materializeNextCurrentSnapshot(snapshot: ChapterSnapshot, currentSnapshot: ChapterSnapshot | null): ChapterSnapshot {
+  const existing = currentSnapshot ? ensureSnapshotIdentity(currentSnapshot) : null
+  const nextRevisionBase = Math.max(existing?.revision ?? 0, snapshot.revision ?? 0)
+  const nextRevision = nextRevisionBase > 0 ? nextRevisionBase + 1 : 1
+  return ensureSnapshotIdentity(snapshot, {
+    sourceType: snapshot.sourceType ?? existing?.sourceType ?? inferSnapshotSourceType(snapshot),
+    sourceSequence: snapshot.sourceSequence ?? existing?.sourceSequence ?? inferSnapshotSourceSequence(snapshot),
+    revision: nextRevision,
+    snapshotId: buildSnapshotRevisionId(snapshot, nextRevision),
+    supersedes: existing?.snapshotId ?? snapshot.snapshotId,
+    isHistorical: false,
+  })
+}
+
+function materializeRestoredCurrentSnapshot(
+  archivedSnapshot: ChapterSnapshot,
+  currentSnapshot: ChapterSnapshot | null,
+): ChapterSnapshot {
+  const archived = ensureSnapshotIdentity(archivedSnapshot, { isHistorical: true })
+  const current = currentSnapshot ? ensureSnapshotIdentity(currentSnapshot) : null
+  const nextRevision = Math.max(archived.revision ?? 1, current?.revision ?? 0) + 1
+  return ensureSnapshotIdentity(archived, {
+    revision: nextRevision,
+    snapshotId: buildSnapshotRevisionId(archived, nextRevision),
+    supersedes: archived.snapshotId,
+    isHistorical: false,
+  })
 }
 
 export type IngestFailReason = "no_llm" | "not_chapter" | "not_final" | "invalid_chapter_number" | "extract_failed"
@@ -641,7 +733,14 @@ function snapshotHistoryFileName(): string {
 async function backupSnapshotBeforeOverwrite(projectPath: string, chapterNumber: number): Promise<void> {
   const currentJsonPath = snapshotJsonPath(projectPath, chapterNumber)
   if (!(await fileExists(currentJsonPath))) return
-  const currentJson = await readFile(currentJsonPath)
+  const currentRaw = await readFile(currentJsonPath)
+  const normalizedCurrent = normalizeChapterSnapshot(JSON.parse(currentRaw), {
+    chapterId: `chapter-${chapterNumber}`,
+    chapterNumber,
+  })
+  const currentJson = normalizedCurrent
+    ? JSON.stringify(ensureSnapshotIdentity(normalizedCurrent, { isHistorical: true }), null, 2)
+    : currentRaw
   const historyDir = snapshotHistoryDir(projectPath, chapterNumber)
   await createDirectory(historyDir)
   await writeFileAtomic(`${historyDir}/${snapshotHistoryFileName()}`, currentJson)
@@ -671,6 +770,7 @@ export async function restoreSnapshotHistory(
   historyFileName: string,
 ): Promise<ChapterSnapshot> {
   const pp = normalizePath(projectPath)
+  const currentSnapshot = await readCurrentSnapshot(pp, chapterNumber)
   await backupSnapshotBeforeOverwrite(pp, chapterNumber)
   const historyPath = `${snapshotHistoryDir(pp, chapterNumber)}/${historyFileName}`
   const snapshot = normalizeChapterSnapshot(
@@ -680,12 +780,14 @@ export async function restoreSnapshotHistory(
   if (!snapshot) {
     throw new Error("Invalid snapshot history file.")
   }
-  await saveSnapshot(pp, snapshot)
-  return snapshot
+  const restoredCurrent = materializeRestoredCurrentSnapshot(snapshot, currentSnapshot)
+  await saveSnapshot(pp, restoredCurrent)
+  return restoredCurrent
 }
 
 export async function saveEditedSnapshot(projectPath: string, snapshot: ChapterSnapshot): Promise<void> {
   const pp = normalizePath(projectPath)
+  const currentSnapshot = await readCurrentSnapshot(pp, snapshot.chapterNumber)
   const normalizedSnapshot = normalizeChapterSnapshot(snapshot, {
     chapterId: snapshot.chapterId,
     chapterNumber: snapshot.chapterNumber,
@@ -694,7 +796,7 @@ export async function saveEditedSnapshot(projectPath: string, snapshot: ChapterS
     throw new Error("Invalid snapshot data.")
   }
   await backupSnapshotBeforeOverwrite(pp, snapshot.chapterNumber)
-  await saveSnapshot(pp, normalizedSnapshot)
+  await saveSnapshot(pp, materializeNextCurrentSnapshot(normalizedSnapshot, currentSnapshot))
 }
 
 function appendPreviewSection(lines: string[], title: string, items: string[]): void {
@@ -799,14 +901,16 @@ export async function syncSnapshotToMemory(
   snapshot: ChapterSnapshot,
 ): Promise<SyncSnapshotToMemoryResult> {
   const pp = normalizePath(projectPath)
+  const currentSnapshot = await readCurrentSnapshot(pp, snapshot.chapterNumber)
   const memorySyncedAt = new Date().toISOString()
-  const syncedSnapshot = normalizeChapterSnapshot(
+  const normalizedSnapshot = normalizeChapterSnapshot(
     { ...snapshot, memorySyncedAt },
     { chapterId: snapshot.chapterId, chapterNumber: snapshot.chapterNumber },
   )
-  if (!syncedSnapshot) {
+  if (!normalizedSnapshot) {
     throw new Error("Invalid snapshot data.")
   }
+  const syncedSnapshot = materializeNextCurrentSnapshot(normalizedSnapshot, currentSnapshot)
 
   // 获取同步前该快照关联的旧实体文件（用于清理）
   const entitiesDir = `${pp}/wiki/entities`
@@ -955,7 +1059,7 @@ async function syncForeshadowingChanges(projectPath: string, snapshot: ChapterSn
 }
 
 async function saveSnapshot(projectPath: string, snapshot: ChapterSnapshot): Promise<void> {
-  const canonicalSnapshot = canonicalizeSnapshotCharacters(snapshot)
+  const canonicalSnapshot = ensureSnapshotIdentity(canonicalizeSnapshotCharacters(snapshot))
   const normalizedSnapshot = normalizeChapterSnapshot(canonicalSnapshot, {
     chapterId: snapshot.chapterId,
     chapterNumber: snapshot.chapterNumber,
