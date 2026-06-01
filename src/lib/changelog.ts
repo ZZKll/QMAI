@@ -9,6 +9,22 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "1.0.0",
+    date: "2026-06-01",
+    highlights: {
+      en: [
+        "Fixed the bug where AI generation could still pull stale memory after outline, graph, or snapshot updates.",
+        "Snapshot sync now records revision metadata, archives superseded memory, and keeps current memory projections separate from history.",
+        "Rollback now rebuilds the active entity, structured memory, cognition, character-state, and foreshadowing layers so restored memory becomes the default source again.",
+      ],
+      zh: [
+        "修复大纲、图谱或快照更新后，AI 生成内容仍可能读取旧记忆数据的问题。",
+        "同步记忆时新增快照版本元数据，并将历史归档与当前有效记忆投影分开管理。",
+        "回滚历史快照时会同步重建当前实体页、结构化记忆、角色认知、人物状态与伏笔追踪，使恢复后的记忆重新成为默认读取来源。",
+      ],
+    },
+  },
+  {
     version: "0.4.20",
     date: "2026-06-01",
     highlights: {
