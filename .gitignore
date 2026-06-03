@@ -12,7 +12,9 @@ node_modules/
 
 # === 测试文件 ===
 tests/
-src/test-helpers/
+src/test-helpers/*
+!src/test-helpers/
+!src/test-helpers/load-test-env.ts
 **/*.test.ts
 **/*.test.tsx
 
