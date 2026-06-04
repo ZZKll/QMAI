@@ -7,6 +7,21 @@ export interface ChangelogEntry {
   }
 }
 
+const TWO_POINT_ONE_CHANGELOG: ChangelogEntry = {
+  version: "2.0.1",
+  date: "2026-06-04",
+  highlights: {
+    en: [
+      "Fixed GitHub Actions CI for macOS and Linux by preparing the required PDFium binaries before the Rust build step.",
+      "Aligned CI dependency preparation with the successful multi-platform release workflow so Windows, macOS, and Linux packaging checks are more consistent.",
+    ],
+    zh: [
+      "修复 GitHub Actions CI 在 macOS 和 Linux 上缺少 PDFium 动态库导致 Rust 构建失败的问题。",
+      "将 CI 的依赖准备流程与已成功运行的多平台打包流程对齐，提升 Windows、macOS、Linux 多平台打包检查的一致性。",
+    ],
+  },
+}
+
 const TWO_POINT_ZERO_CHANGELOG: ChangelogEntry = {
   version: "2.0.0",
   date: "2026-06-04",
@@ -642,6 +657,7 @@ export const CHANGELOG: ChangelogEntry[] = [
 ]
 
 export function currentVersionChangelog(version: string): ChangelogEntry[] {
+  if (version === TWO_POINT_ONE_CHANGELOG.version) return [TWO_POINT_ONE_CHANGELOG]
   if (version === TWO_POINT_ZERO_CHANGELOG.version) return [TWO_POINT_ZERO_CHANGELOG]
   if (isMergedOnePointRelease(version)) return []
   return CHANGELOG.filter((entry) => entry.version === version)
@@ -649,6 +665,7 @@ export function currentVersionChangelog(version: string): ChangelogEntry[] {
 
 export function allChangelog(): ChangelogEntry[] {
   return [
+    TWO_POINT_ONE_CHANGELOG,
     TWO_POINT_ZERO_CHANGELOG,
     ...CHANGELOG.filter((entry) => !isMergedOnePointRelease(entry.version)),
   ]
