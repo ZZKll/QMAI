@@ -185,6 +185,20 @@ export function routeTask(userInput: string): TaskRouteResult {
     return { intent: "general_chat", confidence: 1, extractedParams: {} }
   }
 
+  if (isOpeningChapterRequest(trimmed)) {
+    const chapterNumber = extractOpeningChapterNumber(trimmed)
+    const extractedParams: Record<string, string> = {}
+    if (chapterNumber !== undefined) {
+      extractedParams.chapterNumber = String(chapterNumber)
+    }
+    return {
+      intent: "write_chapter",
+      confidence: 1,
+      chapterNumber,
+      extractedParams,
+    }
+  }
+
   const scores: { intent: NovelTaskIntent; score: number }[] = []
 
   for (const intentDef of INTENT_PATTERNS) {
@@ -236,6 +250,9 @@ export function routeTask(userInput: string): TaskRouteResult {
 }
 
 function extractChapterNumber(text: string): number | undefined {
+  const openingChapterNumber = extractOpeningChapterNumber(text)
+  if (openingChapterNumber !== undefined) return openingChapterNumber
+
   for (const pattern of CHAPTER_NUMBER_PATTERNS) {
     const match = text.match(pattern)
     if (match) {
@@ -245,6 +262,34 @@ function extractChapterNumber(text: string): number | undefined {
       if (Number.isFinite(num) && num > 0) return num
     }
   }
+  return undefined
+}
+
+function isOpeningChapterRequest(text: string): boolean {
+  return [
+    /生成前三章/,
+    /写前三章/,
+    /黄金三章/,
+    /写?首章/,
+    /第一章/,
+    /第\s*1\s*章/,
+    /开篇章节/,
+    /写?开篇/,
+    /写?开局/,
+    /小说开头/,
+    /(生成|写|创作|撰写)\s*(第二章|第\s*2\s*章|第\s*二\s*章)/,
+    /(生成|写|创作|撰写)\s*(第三章|第\s*3\s*章|第\s*三\s*章)/,
+  ].some((pattern) => pattern.test(text))
+}
+
+function extractOpeningChapterNumber(text: string): number | undefined {
+  const digitMatch = text.match(/第\s*([123])\s*章/)
+  if (digitMatch) return Number(digitMatch[1])
+  if (/首章|第一章|第\s*1\s*章|开篇章节|写?开篇|写?开局|小说开头|生成前三章|写前三章|黄金三章/.test(text)) {
+    return 1
+  }
+  if (/第二章|第\s*二\s*章/.test(text)) return 2
+  if (/第三章|第\s*三\s*章/.test(text)) return 3
   return undefined
 }
 

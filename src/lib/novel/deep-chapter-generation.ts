@@ -6,6 +6,7 @@ import { buildContextPack, contextPackToPrompt, type ContextPack } from "./conte
 import { resolveNovelModel } from "./model-resolver"
 import { reviewChapter, type NovelReviewResult } from "./review-adapter"
 import type { TaskRouteResult } from "./task-router"
+import type { GoldenThreeChapterRequest } from "./golden-three-chapters"
 import {
   DEEP_CHAPTER_HARD_MAX_CHARS,
   DEEP_CHAPTER_MAX_OUTPUT_TOKENS,
@@ -21,6 +22,7 @@ export interface DeepChapterGenerationInput {
   projectPath: string
   userRequest: string
   chapterNumber?: number
+  goldenThreeChapter?: GoldenThreeChapterRequest
   llmConfig: LlmConfig
 }
 
@@ -83,7 +85,15 @@ export async function runDeepChapterGeneration(
 
   const taskBrief = await collectModelText(
     writingConfig,
-    [{ role: "user", content: buildDeepChapterBriefPrompt(contextPrompt, input.userRequest, input.chapterNumber) }],
+    [{
+      role: "user",
+      content: buildDeepChapterBriefPrompt(
+        contextPrompt,
+        input.userRequest,
+        input.chapterNumber,
+        input.goldenThreeChapter,
+      ),
+    }],
     deps,
     signal,
     (partial) => callbacks.onThinking?.(formatStageThinking("阶段2：写作任务书", partial)),
@@ -93,7 +103,16 @@ export async function runDeepChapterGeneration(
 
   let draftContent = await collectModelText(
     writingConfig,
-    [{ role: "user", content: buildDeepChapterDraftPrompt(contextPrompt, taskBrief, input.userRequest, input.chapterNumber) }],
+    [{
+      role: "user",
+      content: buildDeepChapterDraftPrompt(
+        contextPrompt,
+        taskBrief,
+        input.userRequest,
+        input.chapterNumber,
+        input.goldenThreeChapter,
+      ),
+    }],
     deps,
     signal,
     (partial) => callbacks.onThinking?.(formatStageThinking("阶段3：正文初稿", partial)),
@@ -111,6 +130,7 @@ export async function runDeepChapterGeneration(
           draftContent,
           input.userRequest,
           input.chapterNumber,
+          input.goldenThreeChapter,
         ),
       }],
       deps,
@@ -164,6 +184,7 @@ export async function runDeepChapterGeneration(
         blockingIssues,
         input.userRequest,
         input.chapterNumber,
+        input.goldenThreeChapter,
       ),
     }],
     deps,
@@ -183,6 +204,7 @@ export async function runDeepChapterGeneration(
           revisedContent,
           input.userRequest,
           input.chapterNumber,
+          input.goldenThreeChapter,
         ),
       }],
       deps,
@@ -245,6 +267,7 @@ async function finalPolishChapter(
         currentContent,
         input.userRequest,
         input.chapterNumber,
+        input.goldenThreeChapter,
       ),
     }],
     deps,

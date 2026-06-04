@@ -1,4 +1,5 @@
 import type { NovelReviewResult } from "./review-adapter"
+import { buildGoldenThreeChapterDirective, type GoldenThreeChapterRequest } from "./golden-three-chapters"
 
 export const DEEP_CHAPTER_TARGET_CHARS = 3000
 export const DEEP_CHAPTER_MIN_CHARS = 2600
@@ -6,7 +7,12 @@ export const DEEP_CHAPTER_LENGTH_RANGE = "2800-3300 字"
 export const DEEP_CHAPTER_HARD_MAX_CHARS = 4500
 export const DEEP_CHAPTER_MAX_OUTPUT_TOKENS = 8000
 
-export function buildDeepChapterBriefPrompt(contextPrompt: string, userRequest: string, chapterNumber?: number): string {
+export function buildDeepChapterBriefPrompt(
+  contextPrompt: string,
+  userRequest: string,
+  chapterNumber?: number,
+  goldenThreeChapter?: GoldenThreeChapterRequest,
+): string {
   return [
     "你是小说写作任务规划助手。",
     "请基于上下文输出一份写作任务书，供后续创作使用。",
@@ -20,13 +26,20 @@ export function buildDeepChapterBriefPrompt(contextPrompt: string, userRequest: 
     "",
     chapterNumber ? `目标章节：第${chapterNumber}章` : "目标章节：用户请求中的章节",
     `用户请求：${userRequest}`,
+    goldenThreeChapterSection(goldenThreeChapter),
     "",
     "上下文：",
     contextPrompt,
   ].join("\n")
 }
 
-export function buildDeepChapterDraftPrompt(contextPrompt: string, taskBrief: string, userRequest: string, chapterNumber?: number): string {
+export function buildDeepChapterDraftPrompt(
+  contextPrompt: string,
+  taskBrief: string,
+  userRequest: string,
+  chapterNumber?: number,
+  goldenThreeChapter?: GoldenThreeChapterRequest,
+): string {
   return [
     "你是专业小说正文写作助手。",
     "请严格根据上下文和写作任务书起草章节正文。",
@@ -42,6 +55,7 @@ export function buildDeepChapterDraftPrompt(contextPrompt: string, taskBrief: st
     "",
     chapterNumber ? `目标章节：第${chapterNumber}章` : "目标章节：用户请求中的章节",
     `用户请求：${userRequest}`,
+    goldenThreeChapterSection(goldenThreeChapter),
     "",
     "写作任务书：",
     taskBrief,
@@ -58,6 +72,7 @@ export function buildDeepChapterRevisionPrompt(
   reviewResults: NovelReviewResult[],
   userRequest: string,
   chapterNumber?: number,
+  goldenThreeChapter?: GoldenThreeChapterRequest,
 ): string {
   return [
     "你是小说正文返修助手。",
@@ -73,6 +88,7 @@ export function buildDeepChapterRevisionPrompt(
     "",
     chapterNumber ? `目标章节：第${chapterNumber}章` : "目标章节：用户请求中的章节",
     `用户请求：${userRequest}`,
+    goldenThreeChapterSection(goldenThreeChapter),
     "",
     "写作任务书：",
     taskBrief,
@@ -94,6 +110,7 @@ export function buildDeepChapterExpansionPrompt(
   currentContent: string,
   userRequest: string,
   chapterNumber?: number,
+  goldenThreeChapter?: GoldenThreeChapterRequest,
 ): string {
   return [
     "你是小说正文扩写补足助手。",
@@ -109,6 +126,7 @@ export function buildDeepChapterExpansionPrompt(
     "",
     chapterNumber ? `目标章节：第${chapterNumber}章` : "目标章节：用户请求中的章节",
     `用户请求：${userRequest}`,
+    goldenThreeChapterSection(goldenThreeChapter),
     "",
     "写作任务书：",
     taskBrief,
@@ -127,6 +145,7 @@ export function buildDeepChapterFinalPolishPrompt(
   currentContent: string,
   userRequest: string,
   chapterNumber?: number,
+  goldenThreeChapter?: GoldenThreeChapterRequest,
 ): string {
   return [
     "你是小说正文最终质检与去AI味助手。",
@@ -142,6 +161,7 @@ export function buildDeepChapterFinalPolishPrompt(
     "",
     chapterNumber ? `目标章节：第${chapterNumber}章` : "目标章节：用户请求中的章节",
     `用户请求：${userRequest}`,
+    goldenThreeChapterSection(goldenThreeChapter),
     "",
     "写作任务书：",
     taskBrief,
@@ -152,6 +172,10 @@ export function buildDeepChapterFinalPolishPrompt(
     "上下文：",
     contextPrompt,
   ].join("\n")
+}
+
+function goldenThreeChapterSection(goldenThreeChapter?: GoldenThreeChapterRequest): string {
+  return buildGoldenThreeChapterDirective(goldenThreeChapter)
 }
 
 function formatReviewIssues(reviewResults: NovelReviewResult[]): string {

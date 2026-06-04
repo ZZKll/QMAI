@@ -25,6 +25,10 @@ import { getConversationTabTitle, sortConversationsByUpdatedAt } from "@/lib/wor
 import { resolveUserVisibleReasoning } from "@/lib/user-visible-reasoning"
 import { runDeepChapterGeneration, shouldUseDeepChapterGeneration } from "@/lib/novel/deep-chapter-generation"
 import { createDeepThinkingStreamRenderer } from "@/lib/deep-thinking-stream"
+import {
+  buildGoldenThreeChapterDirective,
+  detectGoldenThreeChapterRequest,
+} from "@/lib/novel/golden-three-chapters"
 
 function formatDate(timestamp: number): string {
   const d = new Date(timestamp)
@@ -282,6 +286,9 @@ export function ChatPanel() {
       let queryRefs: { title: string; path: string }[] = []
       let langReminder: string | undefined
       const taskRoute = novelMode ? routeTask(text) : null
+      const goldenThreeChapter = novelMode
+        ? detectGoldenThreeChapterRequest(text, taskRoute?.chapterNumber)
+        : undefined
       if (novelMode && project && shouldUseDeepChapterGeneration(taskRoute, deepChapterEnabled)) {
         const controller = new AbortController()
         abortRef.current = controller
@@ -298,6 +305,7 @@ export function ChatPanel() {
               projectPath: normalizePath(project.path),
               userRequest: text,
               chapterNumber: taskRoute?.chapterNumber,
+              goldenThreeChapter: goldenThreeChapter?.enabled ? goldenThreeChapter : undefined,
               llmConfig,
             },
             {
@@ -477,6 +485,7 @@ export function ChatPanel() {
         if (novelMode && project && taskRoute) {
           try {
             const taskDirective = buildTaskDirective(taskRoute)
+            const goldenDirective = buildGoldenThreeChapterDirective(goldenThreeChapter)
             const { buildContextPack, contextPackToPrompt } = await import("@/lib/novel/context-engine")
             const contextPack = await buildContextPack(pp, text, taskRoute.chapterNumber)
             if (contextPack.characterAuras.trim()) {
@@ -490,6 +499,9 @@ export function ChatPanel() {
             const novelConfig = useWikiStore.getState().novelConfig
             const budget = novelConfig.contextTokenBudget > 0 ? novelConfig.contextTokenBudget : undefined
             novelContextPreamble = contextPackToPrompt(contextPack, budget)
+            if (goldenDirective) {
+              novelContextPreamble = goldenDirective + "\n" + novelContextPreamble
+            }
             if (taskDirective) {
               novelContextPreamble = taskDirective + "\n" + novelContextPreamble
             }

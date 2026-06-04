@@ -7,6 +7,23 @@ export interface ChangelogEntry {
   }
 }
 
+const TWO_POINT_TWO_CHANGELOG: ChangelogEntry = {
+  version: "2.0.2",
+  date: "2026-06-04",
+  highlights: {
+    en: [
+      "Added an independent golden-three-chapters constraint for first chapter, opening, and first-three-chapter generation requests.",
+      "AI Chat now injects the golden-three-chapters constraint into both deep chapter generation and ordinary chapter generation when the request matches the opening boundary.",
+      "AI Chat dock controls now show only one switch target at a time: sidebar when currently docked at the bottom, and bottom when currently docked in the sidebar.",
+    ],
+    zh: [
+      "新增独立的黄金三章开篇生成约束，命中首章、第一章、开篇、开局、前三章等请求时自动约束开篇节奏。",
+      "AI 会话在深度章节生成和普通章节生成中都会按需注入黄金三章规则，要求第一章只生成正文并给第二、三章写作方向，第二章或第三章则只生成对应正文。",
+      "AI 会话停靠按钮调整为每次只显示一个切换选项：当前在底栏时只显示停靠在侧栏，当前在侧栏时只显示停靠在底栏。",
+    ],
+  },
+}
+
 const TWO_POINT_ONE_CHANGELOG: ChangelogEntry = {
   version: "2.0.1",
   date: "2026-06-04",
@@ -657,6 +674,7 @@ export const CHANGELOG: ChangelogEntry[] = [
 ]
 
 export function currentVersionChangelog(version: string): ChangelogEntry[] {
+  if (version === TWO_POINT_TWO_CHANGELOG.version) return [TWO_POINT_TWO_CHANGELOG]
   if (version === TWO_POINT_ONE_CHANGELOG.version) return [TWO_POINT_ONE_CHANGELOG]
   if (version === TWO_POINT_ZERO_CHANGELOG.version) return [TWO_POINT_ZERO_CHANGELOG]
   if (isMergedOnePointRelease(version)) return []
@@ -665,6 +683,7 @@ export function currentVersionChangelog(version: string): ChangelogEntry[] {
 
 export function allChangelog(): ChangelogEntry[] {
   return [
+    TWO_POINT_TWO_CHANGELOG,
     TWO_POINT_ONE_CHANGELOG,
     TWO_POINT_ZERO_CHANGELOG,
     ...CHANGELOG.filter((entry) => !isMergedOnePointRelease(entry.version)),
