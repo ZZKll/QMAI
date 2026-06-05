@@ -12,7 +12,7 @@ export { novelMixedSearch, searchPlot, type NovelSearchParams, type NovelSearchR
 export { PROMPTS } from "./prompt-templates"
 export { snapshotToGraphNodes, snapshotToGraphEdges, writeSnapshotToWiki, writePatchFieldsToWiki, detectNodeType, NOVEL_NODE_TYPE_LABELS, NOVEL_RELATION_LABELS, type NovelGraphNode, type NovelGraphEdge, type NovelNodeType } from "./graph-adapter"
 export { emptyCognitionState, mergeCognitionFromSnapshot, loadCognitionState, saveCognitionState, cognitionToContextText, type CharacterCognition, type CognitionState } from "./character-cognition"
-export { getNextChapterNumber, extractChapterNumber, flattenMdFiles } from "./chapter-utils"
+export { getNextChapterNumber, resolveTargetChapterNumberForChat, extractChapterNumber, flattenMdFiles, type ResolveTargetChapterNumberForChatInput } from "./chapter-utils"
 export {
   createEmptyCharacterStateStore,
   saveCharacterStates,

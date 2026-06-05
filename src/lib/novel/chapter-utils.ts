@@ -1,4 +1,5 @@
 import { listDirectory, readFile } from "@/commands/fs"
+import type { NovelTaskIntent } from "./task-router"
 
 export function extractChapterNumber(text: string): number | null {
   const m = text.match(/第\s*(\d+)\s*[章节回]/)
@@ -58,4 +59,56 @@ export async function getNextChapterNumber(projectPath: string): Promise<number>
   }
   if (!hasChapterOne && maxNum === 0) return 1
   return maxNum + 1
+}
+
+export interface ResolveTargetChapterNumberForChatInput {
+  projectPath: string
+  userRequest: string
+  routeIntent?: NovelTaskIntent
+  routeChapterNumber?: number
+  selectedFile?: string | null
+}
+
+export async function resolveTargetChapterNumberForChat(input: ResolveTargetChapterNumberForChatInput): Promise<number | undefined> {
+  if (input.routeChapterNumber && input.routeChapterNumber > 0) {
+    return input.routeChapterNumber
+  }
+
+  if (!shouldResolveNextChapter(input.userRequest, input.routeIntent)) {
+    return undefined
+  }
+
+  const selectedChapterNumber = await readSelectedChapterNumber(input.selectedFile)
+  if (selectedChapterNumber && selectedChapterNumber > 0) {
+    return selectedChapterNumber + 1
+  }
+
+  return getNextChapterNumber(input.projectPath)
+}
+
+function shouldResolveNextChapter(userRequest: string, routeIntent?: NovelTaskIntent): boolean {
+  if (routeIntent !== "continue_chapter" && routeIntent !== "write_chapter") return false
+  const compact = userRequest.replace(/\s+/g, "")
+  return /下一章|下1章|下章|新的?一章/.test(compact)
+}
+
+async function readSelectedChapterNumber(selectedFile?: string | null): Promise<number | undefined> {
+  if (!selectedFile) return undefined
+  const normalized = selectedFile.replace(/\\/g, "/")
+  if (!/\/wiki\/chapters\//i.test(normalized)) return undefined
+
+  const byName = extractChapterNumber(normalized.split("/").pop()?.replace(/\.md$/i, "") ?? "")
+  if (byName) return byName
+
+  try {
+    const content = await readFile(selectedFile)
+    const byFrontmatter = content.match(/^chapter_number:\s*(\d+)\s*$/m)
+    if (byFrontmatter?.[1]) {
+      const n = Number.parseInt(byFrontmatter[1], 10)
+      if (Number.isFinite(n) && n > 0) return n
+    }
+  } catch {
+    // ignore unreadable selected chapter file
+  }
+  return undefined
 }

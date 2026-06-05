@@ -38,6 +38,8 @@ async function streamViaCodexCli(
 }
 
 const DECODER = new TextDecoder()
+const NETWORK_RETRY_DELAYS_MS = [30_000, 60_000, 90_000, 120_000]
+export const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 30 * 60 * 1000
 
 export function shouldRetryWithBrowserFetch(errorDetail: string): boolean {
   return /client not allowed/i.test(errorDetail) && /tauri-plugin-http/i.test(errorDetail)
@@ -48,6 +50,18 @@ function parseLines(chunk: Uint8Array, buffer: string): [string[], string] {
   const lines = text.split("\n")
   const remaining = lines.pop() ?? ""
   return [lines, remaining]
+}
+
+function waitForRetry(ms: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false)
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => resolve(true), ms)
+    const onAbort = () => {
+      clearTimeout(timeoutId)
+      resolve(false)
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
 }
 
 export async function streamChat(
@@ -86,7 +100,7 @@ export async function streamChat(
   // almost always a fast network failure (DNS, TLS, 404, refused) that
   // WebKit surfaces as a generic "Load failed". We track whether the
   // backstop actually fired so we can tell the two apart in the error.
-  const timeoutMs = 30 * 60 * 1000 // 30 min — generous backstop for huge-context reasoning models
+  const timeoutMs = DEFAULT_LLM_REQUEST_TIMEOUT_MS // 30 min — generous backstop for huge-context reasoning models
   let combinedSignal = signal
   let timeoutController: AbortController | undefined
   let timeoutFired = false
@@ -118,9 +132,30 @@ export async function streamChat(
   let response: Response
   try {
     const httpFetch = await getHttpFetch()
-    response = await httpFetch(providerConfig.url, requestInit)
+    let attempt = 0
+    while (true) {
+      try {
+        response = await httpFetch(providerConfig.url, requestInit)
+        break
+      } catch (err) {
+        if (signal?.aborted || combinedSignal?.aborted) throw err
+        if (!isFetchNetworkError(err)) throw err
+        if (timeoutFired) throw err
+        const retryDelay = NETWORK_RETRY_DELAYS_MS[attempt]
+        if (retryDelay === undefined) {
+          throw new Error(
+            `无法连接到模型接口：软件已自动等待并重试约 5 分钟，但仍然连接失败。` +
+            `常见原因是网络不稳定、代理不可用、接口地址无法访问、服务商网关暂时中断，或本机网络环境阻断了访问。` +
+            `请检查网络、代理和接口地址后再重试。接口地址：${providerConfig.url}`,
+          )
+        }
+        attempt += 1
+        const shouldContinue = await waitForRetry(retryDelay, combinedSignal)
+        if (!shouldContinue) throw err
+      }
+    }
   } catch (err) {
-    if (signal?.aborted) {
+    if (signal?.aborted || (combinedSignal?.aborted && !timeoutFired)) {
       onDone()
       return
     }
@@ -143,7 +178,7 @@ export async function streamChat(
       // wrong endpoint, CORS preflight rejection, etc. All webviews
       // collapse this class of failure into an opaque error — point
       // users at the likely cause (endpoint / key / connectivity).
-      onError(new Error(`Network error reaching ${providerConfig.url}. Check endpoint URL, API key, and connectivity.`))
+      onError(new Error(`网络连接中断，请检查网络、代理或接口地址后重试。接口地址：${providerConfig.url}`))
       return
     }
     onError(err instanceof Error ? err : new Error(String(err)))

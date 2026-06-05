@@ -52,6 +52,10 @@ export function getHttpFetch(): Promise<typeof globalThis.fetch> {
   return pluginFetchPromise
 }
 
+export function resetHttpFetchForTests(): void {
+  pluginFetchPromise = null
+}
+
 /**
  * Detect fetch-level network failures across Tauri's different webview
  * backends. Each platform phrases the same failure class differently:
@@ -74,6 +78,8 @@ export function isFetchNetworkError(err: unknown): boolean {
   if (err.message === "Load failed") return true
   // Chromium mid-stream drop
   if (err.message === "Failed to fetch") return true
+  // Tauri plugin-http / Rust reqwest send-stage failure
+  if (/error sending request for url/i.test(err.message)) return true
   if (err.message.includes("network error")) return true
   return false
 }

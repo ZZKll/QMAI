@@ -13,7 +13,7 @@ import {
   buildDeepChapterDraftPrompt,
   buildDeepChapterRevisionPrompt,
   DEEP_CHAPTER_MIN_CHARS,
-  DEEP_CHAPTER_TARGET_CHARS,
+  DEEP_CHAPTER_REWRITE_MAX_CHARS,
 } from "./deep-chapter-prompts"
 
 const llmConfig = {
@@ -113,9 +113,9 @@ describe("runDeepChapterGeneration", () => {
     ]
 
     for (const prompt of prompts) {
-      expect(prompt).toContain(`约 ${DEEP_CHAPTER_TARGET_CHARS} 字`)
       expect(prompt).toContain(`低于 ${DEEP_CHAPTER_MIN_CHARS} 字`)
-      expect(prompt).toContain("2800-3300 字")
+      expect(prompt).toContain("2200-3200 字")
+      expect(prompt).toContain("6000 字")
     }
   })
 
@@ -210,22 +210,60 @@ describe("runDeepChapterGeneration", () => {
     expect(thinking.join("\n")).toContain("阶段6：简单审查与去AI味")
   })
 
-  it("trims runaway repeated chapter output before review and final polish", async () => {
-    const repeatUnit = "屋外雨声小了些，风还从门缝挤进来。旧木箱的盖子松松地合上，那东西还在。小晴在床上动了动，掌心湿热，像两股不同的水在交汇。\n"
-    const runawayDraft = repeatUnit.repeat(900)
-    const finalPolished = chapterText("最终去AI味正文", 3000)
+  it("checks the final polish length and returns to expansion before completing", async () => {
+    const draft = chapterText("初稿正文内容", 3000)
+    const shortFinal = chapterText("最终润色后过短", 1800)
+    const expandedAfterFinalCheck = chapterText("阶段6字数不足后扩写正文", 3000)
+    const finalPolished = chapterText("再次简单审查后的最终正文", 3000)
+    const responses = [
+      "写作任务书内容",
+      draft,
+      shortFinal,
+      expandedAfterFinalCheck,
+      finalPolished,
+    ]
     const deps: DeepChapterGenerationDeps = {
       buildContextPack: vi.fn(async () => contextPack),
       contextPackToPrompt: vi.fn(() => "上下文包内容"),
       reviewChapter: vi.fn(async () => []),
-      streamChat: vi.fn(async (_config: LlmConfig, messages: ChatMessage[], callbacks: StreamCallbacks) => {
-        const prompt = messages.map((message) => String(message.content)).join("\n")
-        const content = prompt.includes("简单审查") || prompt.includes("去AI味")
-          ? finalPolished
-          : prompt.includes("章节正文")
-            ? runawayDraft
-            : "写作任务书内容"
-        callbacks.onToken(content)
+      streamChat: vi.fn(async (_config: LlmConfig, _messages: ChatMessage[], callbacks: StreamCallbacks) => {
+        const content = responses.shift()
+        callbacks.onToken(content ?? "")
+        callbacks.onDone()
+      }),
+    }
+    const thinking: string[] = []
+
+    const result = await runDeepChapterGeneration(
+      { projectPath: "E:/Novel", userRequest: "生成首章", chapterNumber: 1, llmConfig },
+      { onThinking: (content) => thinking.push(content) },
+      deps,
+    )
+
+    expect(result.finalContent).toBe(finalPolished)
+    expect(deps.streamChat).toHaveBeenCalledTimes(5)
+    expect(thinking.join("\n")).toContain("阶段5：无需自动返修")
+    expect(thinking.join("\n")).toContain("阶段6：字数检查未达标")
+    expect(thinking.join("\n")).toContain("阶段3：正文扩写补足")
+  })
+
+  it("trims runaway repeated chapter output before review and final polish", async () => {
+    const repeatUnit = "屋外雨声小了些，风还从门缝挤进来。旧木箱的盖子松松地合上，那东西还在。小晴在床上动了动，掌心湿热，像两股不同的水在交汇。\n"
+    const runawayDraft = repeatUnit.repeat(900)
+    const optimizedDraft = chapterText("阶段4优化后正文", 3000)
+    const finalPolished = chapterText("最终去AI味正文", 3000)
+    const responses = [
+      "写作任务书内容",
+      runawayDraft,
+      optimizedDraft,
+      finalPolished,
+    ]
+    const deps: DeepChapterGenerationDeps = {
+      buildContextPack: vi.fn(async () => contextPack),
+      contextPackToPrompt: vi.fn(() => "上下文包内容"),
+      reviewChapter: vi.fn(async () => []),
+      streamChat: vi.fn(async (_config: LlmConfig, _messages: ChatMessage[], callbacks: StreamCallbacks) => {
+        callbacks.onToken(responses.shift() ?? "")
         callbacks.onDone()
       }),
     }
@@ -237,28 +275,28 @@ describe("runDeepChapterGeneration", () => {
       deps,
     )
 
-    expect(result.draftContent.length).toBeLessThanOrEqual(4500)
+    expect(result.draftContent).toBe(optimizedDraft)
     expect(result.finalContent).toBe(finalPolished)
-    expect(deps.reviewChapter).toHaveBeenCalledWith("E:/Novel", expect.stringMatching(/^屋外雨声小了些/), 3)
-    expect((deps.reviewChapter as ReturnType<typeof vi.fn>).mock.calls[0][1].length).toBeLessThanOrEqual(4500)
+    expect(deps.reviewChapter).toHaveBeenCalledWith("E:/Novel", optimizedDraft, 3)
     expect(thinking.join("\n")).toContain("检测到模型重复输出")
   })
 
   it("uses a plain chapter length limit message when the hard max is reached", async () => {
-    const longDraft = Array.from({ length: 4700 }, (_, index) => `句${index}`).join("")
+    const longDraft = Array.from({ length: 6500 }, (_, index) => `句${index}`).join("")
+    const controlledDraft = chapterText("控字重写正文", 3200)
     const finalPolished = chapterText("最终去AI味正文", 3000)
+    const responses = [
+      "写作任务书内容",
+      longDraft,
+      controlledDraft,
+      finalPolished,
+    ]
     const deps: DeepChapterGenerationDeps = {
       buildContextPack: vi.fn(async () => contextPack),
       contextPackToPrompt: vi.fn(() => "上下文包内容"),
       reviewChapter: vi.fn(async () => []),
-      streamChat: vi.fn(async (_config: LlmConfig, messages: ChatMessage[], callbacks: StreamCallbacks) => {
-        const prompt = messages.map((message) => String(message.content)).join("\n")
-        const content = prompt.includes("简单审查") || prompt.includes("去AI味")
-          ? finalPolished
-          : prompt.includes("章节正文")
-            ? longDraft
-            : "写作任务书内容"
-        callbacks.onToken(content)
+      streamChat: vi.fn(async (_config: LlmConfig, _messages: ChatMessage[], callbacks: StreamCallbacks) => {
+        callbacks.onToken(responses.shift() ?? "")
         callbacks.onDone()
       }),
     }
@@ -270,30 +308,160 @@ describe("runDeepChapterGeneration", () => {
       deps,
     )
 
-    expect(thinking.join("\n")).toContain("已达到本章字数上限。本次章节最多生成 4500 字，达到上限后会自动暂停输出。建议按章节逐章生成，避免一次生成过多内容导致中断。")
+    expect(thinking.join("\n")).toContain("已达到本章字数上限。本次章节最多生成 6000 字，达到上限后会自动暂停输出。建议按章节逐章生成，避免一次生成过多内容导致中断。")
     expect(thinking.join("\n")).not.toContain("内容已达到安全上限")
   })
 
-  it("does not fail when the stream reports request cancelled after the chapter length limit stops output", async () => {
-    const longDraft = Array.from({ length: 4700 }, (_, index) => `句${index}`).join("")
+  it("returns to stage 3 for a controlled rewrite before review when the draft is too long", async () => {
+    const overlongDraft = chapterText("过长初稿正文", DEEP_CHAPTER_REWRITE_MAX_CHARS + 80)
+    const controlledDraft = chapterText("控字重写正文", 3200)
     const finalPolished = chapterText("最终去AI味正文", 3000)
+    const responses = [
+      "写作任务书内容",
+      overlongDraft,
+      controlledDraft,
+      finalPolished,
+    ]
     const deps: DeepChapterGenerationDeps = {
       buildContextPack: vi.fn(async () => contextPack),
       contextPackToPrompt: vi.fn(() => "上下文包内容"),
       reviewChapter: vi.fn(async () => []),
-      streamChat: vi.fn(async (_config: LlmConfig, messages: ChatMessage[], callbacks: StreamCallbacks) => {
-        const prompt = messages.map((message) => String(message.content)).join("\n")
-        if (prompt.includes("简单审查") || prompt.includes("去AI味")) {
-          callbacks.onToken(finalPolished)
-          callbacks.onDone()
-          return
-        }
-        if (prompt.includes("章节正文")) {
+      streamChat: vi.fn(async (_config: LlmConfig, _messages: ChatMessage[], callbacks: StreamCallbacks) => {
+        callbacks.onToken(responses.shift() ?? "")
+        callbacks.onDone()
+      }),
+    }
+    const thinking: string[] = []
+
+    await runDeepChapterGeneration(
+      { projectPath: "E:/Novel", userRequest: "生成第3章", chapterNumber: 3, llmConfig },
+      { onThinking: (content) => thinking.push(content) },
+      deps,
+    )
+
+    expect(deps.reviewChapter).toHaveBeenCalledWith("E:/Novel", controlledDraft, 3)
+    expect(deps.reviewChapter).not.toHaveBeenCalledWith("E:/Novel", overlongDraft, 3)
+    expect(thinking.join("\n")).toContain("阶段4：字数审核与正文优化")
+    expect(thinking.join("\n")).toContain("2200-3200")
+    expect(thinking.join("\n")).toContain("第 1 次优化完成")
+  })
+
+  it("optimizes the stage 3 draft in stage 4 before review and sends the optimized draft forward", async () => {
+    const draft = chapterText("阶段3较长初稿", 5500)
+    const optimizedDraft = chapterText("阶段4优化后正文", 3000)
+    const finalPolished = chapterText("最终去AI味正文", 3000)
+    const responses = [
+      "写作任务书内容",
+      draft,
+      optimizedDraft,
+      finalPolished,
+    ]
+    const deps: DeepChapterGenerationDeps = {
+      buildContextPack: vi.fn(async () => contextPack),
+      contextPackToPrompt: vi.fn(() => "上下文包内容"),
+      reviewChapter: vi.fn(async () => []),
+      streamChat: vi.fn(async (_config: LlmConfig, _messages: ChatMessage[], callbacks: StreamCallbacks) => {
+        callbacks.onToken(responses.shift() ?? "")
+        callbacks.onDone()
+      }),
+    }
+    const thinking: string[] = []
+
+    await runDeepChapterGeneration(
+      { projectPath: "E:/Novel", userRequest: "生成第3章", chapterNumber: 3, llmConfig },
+      { onThinking: (content) => thinking.push(content) },
+      deps,
+    )
+
+    expect(deps.reviewChapter).toHaveBeenCalledWith("E:/Novel", optimizedDraft, 3)
+    expect(deps.reviewChapter).not.toHaveBeenCalledWith("E:/Novel", draft, 3)
+    expect(thinking.join("\n")).toContain("阶段4：字数审核与正文优化")
+    expect(thinking.join("\n")).toContain("2200-3200")
+  })
+
+  it("stops after four failed stage 4 length optimizations when output remains above 4000 chars", async () => {
+    const draft = chapterText("阶段3超长初稿", 5500)
+    const responses = [
+      "写作任务书内容",
+      draft,
+      chapterText("第1次优化仍超长", 4500),
+      chapterText("第2次优化仍超长", 4300),
+      chapterText("第3次优化仍超长", 4100),
+      chapterText("第4次优化仍超长", 4050),
+    ]
+    const deps: DeepChapterGenerationDeps = {
+      buildContextPack: vi.fn(async () => contextPack),
+      contextPackToPrompt: vi.fn(() => "上下文包内容"),
+      reviewChapter: vi.fn(async () => []),
+      streamChat: vi.fn(async (_config: LlmConfig, _messages: ChatMessage[], callbacks: StreamCallbacks) => {
+        callbacks.onToken(responses.shift() ?? "")
+        callbacks.onDone()
+      }),
+    }
+
+    await expect(runDeepChapterGeneration(
+      { projectPath: "E:/Novel", userRequest: "生成第3章", chapterNumber: 3, llmConfig },
+      {},
+      deps,
+    )).rejects.toThrow("阶段4字数优化已连续尝试 4 次")
+
+    expect(deps.reviewChapter).not.toHaveBeenCalled()
+    expect(deps.streamChat).toHaveBeenCalledTimes(6)
+  })
+
+  it("checks final polish length and returns to stage 3 when the stage 6 result is too long", async () => {
+    const draft = chapterText("初稿正文内容", 3000)
+    const overlongFinal = chapterText("简单审查后过长正文", DEEP_CHAPTER_REWRITE_MAX_CHARS + 60)
+    const controlledFinal = chapterText("阶段6控字重写正文", 3100)
+    const repolishedFinal = chapterText("再次简单审查后的最终正文", 3000)
+    const responses = [
+      "写作任务书内容",
+      draft,
+      overlongFinal,
+      controlledFinal,
+      repolishedFinal,
+    ]
+    const deps: DeepChapterGenerationDeps = {
+      buildContextPack: vi.fn(async () => contextPack),
+      contextPackToPrompt: vi.fn(() => "上下文包内容"),
+      reviewChapter: vi.fn(async () => []),
+      streamChat: vi.fn(async (_config: LlmConfig, _messages: ChatMessage[], callbacks: StreamCallbacks) => {
+        callbacks.onToken(responses.shift() ?? "")
+        callbacks.onDone()
+      }),
+    }
+    const thinking: string[] = []
+
+    const result = await runDeepChapterGeneration(
+      { projectPath: "E:/Novel", userRequest: "生成第3章", chapterNumber: 3, llmConfig },
+      { onThinking: (content) => thinking.push(content) },
+      deps,
+    )
+
+    expect(result.finalContent).toBe(repolishedFinal)
+    expect(deps.streamChat).toHaveBeenCalledTimes(5)
+    expect(thinking.join("\n")).toContain("阶段6：字数检查与正文优化")
+    expect(thinking.join("\n")).toContain("2200-3200")
+    expect(thinking.join("\n")).toContain("第 1 次优化完成")
+  })
+
+  it("does not fail when the stream reports request cancelled after the chapter length limit stops output", async () => {
+    const longDraft = Array.from({ length: 4700 }, (_, index) => `句${index}`).join("")
+    const controlledDraft = chapterText("控字重写正文", 3200)
+    const finalPolished = chapterText("最终去AI味正文", 3000)
+    let callIndex = 0
+    const deps: DeepChapterGenerationDeps = {
+      buildContextPack: vi.fn(async () => contextPack),
+      contextPackToPrompt: vi.fn(() => "上下文包内容"),
+      reviewChapter: vi.fn(async () => []),
+      streamChat: vi.fn(async (_config: LlmConfig, _messages: ChatMessage[], callbacks: StreamCallbacks) => {
+        callIndex += 1
+        if (callIndex === 2) {
           callbacks.onToken(longDraft)
           callbacks.onError(new Error("Request cancelled"))
           return
         }
-        callbacks.onToken("写作任务书内容")
+        callbacks.onToken(callIndex === 1 ? "写作任务书内容" : callIndex === 3 ? controlledDraft : finalPolished)
         callbacks.onDone()
       }),
     }

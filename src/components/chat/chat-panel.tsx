@@ -7,14 +7,14 @@ import { ChatMessage, StreamingMessage } from "./chat-message"
 import { ChatDockControls } from "./chat-dock-controls"
 import { setLastQueryPages, useSourceFiles } from "./chat-shared"
 import { ChatInput } from "./chat-input"
-import { useChatStore, chatMessagesToLLM } from "@/stores/chat-store"
+import { useChatStore, chatMessagesToLLM, type DisplayMessage } from "@/stores/chat-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { streamChat, type ChatMessage as LLMMessage } from "@/lib/llm-client"
 import { executeIngestWrites } from "@/lib/ingest"
 import { routeTask, buildTaskDirective } from "@/lib/novel/task-router"
 import { listDirectory, readFile, writeFile, createDirectory, deleteFile } from "@/commands/fs"
 import { searchWiki, tokenizeQuery } from "@/lib/search"
-import { getNextChapterNumber } from "@/lib/novel/chapter-utils"
+import { getNextChapterNumber, resolveTargetChapterNumberForChat } from "@/lib/novel/chapter-utils"
 import { buildQmQuaiSystemPrompt, injectDeAiDirective } from "@/lib/novel/de-ai-adapter"
 import { cleanGeneratedChapterContentForSave } from "@/lib/novel/chapter-content-cleanup"
 import { normalizePath, getFileName, getRelativePath } from "@/lib/path-utils"
@@ -24,10 +24,18 @@ import { computeContextBudget } from "@/lib/context-budget"
 import { getConversationTabTitle, sortConversationsByUpdatedAt } from "@/lib/workspace-layout"
 import { resolveUserVisibleReasoning } from "@/lib/user-visible-reasoning"
 import { createDeepThinkingStreamRenderer } from "@/lib/deep-thinking-stream"
+import { resolveNovelModel } from "@/lib/novel/model-resolver"
 import {
   buildGoldenThreeChapterDirective,
   detectGoldenThreeChapterRequest,
 } from "@/lib/novel/golden-three-chapters"
+import { createStreamSessionGuard } from "./stream-session"
+import {
+  appendContinueUnfinishedDeepChapterContext,
+  buildContinueUnfinishedDeepChapterPrompt,
+  extractContinueUnfinishedDeepChapterContext,
+  stripContinueUnfinishedDeepChapterContext,
+} from "./chat-resume"
 
 function formatDate(timestamp: number): string {
   const d = new Date(timestamp)
@@ -43,6 +51,12 @@ export function getDeepChapterToggleButtonClass(enabled: boolean): string {
   return enabled
     ? "border-primary bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 hover:text-primary-foreground"
     : "text-muted-foreground hover:text-foreground"
+}
+
+function findPreviousUserRequest(messages: DisplayMessage[], assistantMessageId: string): string | undefined {
+  const assistantIndex = messages.findIndex((message) => message.id === assistantMessageId)
+  const searchRange = assistantIndex >= 0 ? messages.slice(0, assistantIndex) : messages
+  return [...searchRange].reverse().find((message) => message.role === "user")?.content
 }
 
 function ConversationTabs() {
@@ -153,8 +167,11 @@ export function ChatPanel() {
   const novelMode = useWikiStore((s) => s.novelMode)
   const llmConfig = useWikiStore((s) => s.llmConfig)
   const setFileTree = useWikiStore((s) => s.setFileTree)
+  const selectedFile = useWikiStore((s) => s.selectedFile)
 
   const abortRef = useRef<AbortController | null>(null)
+  const streamSessionGuardRef = useRef(createStreamSessionGuard())
+  const activeStreamSessionRef = useRef<number | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const soulDialogResolverRef = useRef<((confirmed: boolean) => void) | null>(null)
@@ -279,14 +296,36 @@ export function ChatPanel() {
 
       addMessage("user", text)
       setStreaming(true)
+      const sessionId = streamSessionGuardRef.current.start()
+      activeStreamSessionRef.current = sessionId
 
       // Build system prompt with wiki context using graph-enhanced retrieval
       const systemMessages: LLMMessage[] = []
       let queryRefs: { title: string; path: string }[] = []
       let langReminder: string | undefined
       const taskRoute = novelMode ? routeTask(text) : null
+      const pp = project ? normalizePath(project.path) : ""
+      const targetChapterNumber = novelMode && project && taskRoute
+        ? await resolveTargetChapterNumberForChat({
+          projectPath: pp,
+          userRequest: text,
+          routeIntent: taskRoute.intent,
+          routeChapterNumber: taskRoute.chapterNumber,
+          selectedFile,
+        })
+        : undefined
+      const effectiveTaskRoute = taskRoute && targetChapterNumber
+        ? {
+          ...taskRoute,
+          chapterNumber: targetChapterNumber,
+          extractedParams: {
+            ...taskRoute.extractedParams,
+            chapterNumber: String(targetChapterNumber),
+          },
+        }
+        : taskRoute
       const goldenThreeChapter = novelMode
-        ? detectGoldenThreeChapterRequest(text, taskRoute?.chapterNumber)
+        ? detectGoldenThreeChapterRequest(text, effectiveTaskRoute?.chapterNumber)
         : undefined
       if (novelMode && project && deepChapterEnabled) {
         const { runDeepChapterGeneration } = await import("@/lib/novel/deep-chapter-generation")
@@ -295,6 +334,7 @@ export function ChatPanel() {
         const deepStream = createDeepThinkingStreamRenderer()
         let accumulated = ""
         const appendThinkingBlock = (content: string) => {
+          if (!streamSessionGuardRef.current.isActive(sessionId)) return
           accumulated = deepStream.updateThinking(content)
           setStreamingContent(accumulated)
         }
@@ -302,15 +342,16 @@ export function ChatPanel() {
         try {
           await runDeepChapterGeneration(
             {
-              projectPath: normalizePath(project.path),
+              projectPath: pp,
               userRequest: text,
-              chapterNumber: taskRoute?.chapterNumber,
+              chapterNumber: effectiveTaskRoute?.chapterNumber,
               goldenThreeChapter: goldenThreeChapter?.enabled ? goldenThreeChapter : undefined,
               llmConfig,
             },
             {
               onThinking: appendThinkingBlock,
               onFinalContent: (content) => {
+                if (!streamSessionGuardRef.current.isActive(sessionId)) return
                 accumulated = deepStream.appendFinal(content)
                 setStreamingContent(accumulated)
               },
@@ -318,24 +359,45 @@ export function ChatPanel() {
             undefined,
             controller.signal,
           )
-          finalizeStream(accumulated, [])
+          streamSessionGuardRef.current.finish(sessionId, () => {
+            finalizeStream(accumulated, [])
+            activeStreamSessionRef.current = null
+          })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
           const existing = deepStream.getContent()
           if (controller.signal.aborted || message === "已停止生成") {
-            finalizeStream(`${existing ? `${existing}\n\n` : ""}已停止生成。`, [])
+            streamSessionGuardRef.current.finish(sessionId, () => {
+              finalizeStream(`${existing ? `${existing}\n\n` : ""}已停止生成。`, [])
+              activeStreamSessionRef.current = null
+            })
           } else {
-            finalizeStream(`${existing ? `${existing}\n\n` : ""}出错：深度生成章节失败：${message}`, undefined)
+            streamSessionGuardRef.current.finish(sessionId, () => {
+              const visibleFailure = `${existing ? `${existing}\n\n` : ""}出错：深度生成章节失败：${message}`
+              finalizeStream(
+                appendContinueUnfinishedDeepChapterContext(visibleFailure, {
+                  originalRequest: text,
+                  resumeContext: visibleFailure,
+                }),
+                undefined,
+              )
+              activeStreamSessionRef.current = null
+            })
           }
         } finally {
-          abortRef.current = null
+          if (activeStreamSessionRef.current === sessionId) {
+            activeStreamSessionRef.current = null
+          }
+          if (abortRef.current === controller) {
+            abortRef.current = null
+          }
         }
         return
       }
-      const shouldUseQmQuaiSkill = taskRoute != null && (
-        taskRoute.intent === "write_chapter" ||
-        taskRoute.intent === "continue_chapter" ||
-        taskRoute.intent === "rewrite_chapter"
+      const shouldUseQmQuaiSkill = effectiveTaskRoute != null && (
+        effectiveTaskRoute.intent === "write_chapter" ||
+        effectiveTaskRoute.intent === "continue_chapter" ||
+        effectiveTaskRoute.intent === "rewrite_chapter"
       )
       const qmQuaiSystemPrompt = shouldUseQmQuaiSkill ? buildQmQuaiSystemPrompt() : ""
       // Pure greetings ("hi", "你好", "嗨") don't warrant running the whole
@@ -482,19 +544,22 @@ export function ChatPanel() {
         const outLang = getOutputLanguage(text)
 
         let novelContextPreamble = ""
-        if (novelMode && project && taskRoute) {
+        if (novelMode && project && effectiveTaskRoute) {
           try {
-            const taskDirective = buildTaskDirective(taskRoute)
+            const taskDirective = buildTaskDirective(effectiveTaskRoute)
             const goldenDirective = buildGoldenThreeChapterDirective(goldenThreeChapter)
             const { buildContextPack, contextPackToPrompt } = await import("@/lib/novel/context-engine")
-            const contextPack = await buildContextPack(pp, text, taskRoute.chapterNumber)
+            const contextPack = await buildContextPack(pp, text, effectiveTaskRoute.chapterNumber)
             if (contextPack.characterAuras.trim()) {
-              const confirmed = await requestSoulDialog(contextPack.characterAuras)
-              if (!confirmed) {
+            const confirmed = await requestSoulDialog(contextPack.characterAuras)
+            if (!confirmed) {
+              streamSessionGuardRef.current.finish(sessionId, () => {
                 finalizeStream("已取消本次生成，角色灵魂上下文未发送给模型。", undefined)
-                abortRef.current = null
-                return
-              }
+                activeStreamSessionRef.current = null
+              })
+              abortRef.current = null
+              return
+            }
             }
             const novelConfig = useWikiStore.getState().novelConfig
             const budget = novelConfig.contextTokenBudget > 0 ? novelConfig.contextTokenBudget : undefined
@@ -636,6 +701,7 @@ export function ChatPanel() {
       let thinkingOpen = false
 
       const appendReasoning = (token: string) => {
+        if (!streamSessionGuardRef.current.isActive(sessionId)) return
         if (!token) return
         if (!thinkingOpen) {
           thinkingOpen = true
@@ -647,6 +713,7 @@ export function ChatPanel() {
       }
 
       const closeReasoning = () => {
+        if (!streamSessionGuardRef.current.isActive(sessionId)) return
         if (!thinkingOpen) return
         thinkingOpen = false
         accumulated += "</think>"
@@ -658,33 +725,48 @@ export function ChatPanel() {
         llmMessages,
         {
           onToken: (token) => {
+            if (!streamSessionGuardRef.current.isActive(sessionId)) return
             closeReasoning()
             accumulated += token
             appendStreamToken(token)
           },
           onReasoningToken: appendReasoning,
           onDone: () => {
-            closeReasoning()
-            finalizeStream(accumulated, queryRefs)
-            abortRef.current = null
+            streamSessionGuardRef.current.finish(sessionId, () => {
+              closeReasoning()
+              finalizeStream(accumulated, queryRefs)
+              activeStreamSessionRef.current = null
+              abortRef.current = null
+            })
             // save-worthy detection removed — user has direct "Save to Wiki" button on each message
           },
           onError: (err) => {
-            finalizeStream(`出错：${err.message}`, undefined)
-            abortRef.current = null
+            streamSessionGuardRef.current.finish(sessionId, () => {
+              finalizeStream(`出错：${err.message}`, undefined)
+              activeStreamSessionRef.current = null
+              abortRef.current = null
+            })
           },
         },
         controller.signal,
         { reasoning: resolveUserVisibleReasoning(llmConfig.reasoning) },
       )
     },
-    [llmConfig, addMessage, setStreaming, setStreamingContent, appendStreamToken, finalizeStream, createConversation, maxHistoryMessages, requestSoulDialog, deepChapterEnabled],
+    [llmConfig, addMessage, setStreaming, setStreamingContent, appendStreamToken, finalizeStream, createConversation, maxHistoryMessages, requestSoulDialog, deepChapterEnabled, project, novelMode, selectedFile],
   )
 
   const handleStop = useCallback(() => {
+    const sessionId = activeStreamSessionRef.current
+    const currentStreamingContent = useChatStore.getState().streamingContent
     abortRef.current?.abort()
     abortRef.current = null
-  }, [])
+    if (sessionId !== null) {
+      streamSessionGuardRef.current.stop(sessionId, () => {
+        finalizeStream(`${currentStreamingContent ? `${currentStreamingContent}\n\n` : ""}已停止生成。`, [])
+        activeStreamSessionRef.current = null
+      })
+    }
+  }, [finalizeStream])
 
   const handleRegenerate = useCallback(async () => {
     if (isStreaming) return
@@ -715,6 +797,149 @@ export function ChatPanel() {
     if (isStreaming) return
     handleSend("请根据当前小说上下文、记忆库、最新章节结尾、下一章推进建议和章纲，继续生成下一章正文。只输出可直接保存到章节库的小说正文，不要解释，不要列提纲。正文必须是完整章节，目标约 3000 字，建议 2800-3300 字，低于 2600 字视为未完成。")
   }, [handleSend, isStreaming])
+
+  const handleContinueUnfinished = useCallback(async (assistantMessage: DisplayMessage) => {
+    if (isStreaming) return
+
+    let convId = useChatStore.getState().activeConversationId
+    if (!convId) {
+      convId = createConversation()
+    }
+
+    const active = useChatStore.getState().getActiveMessages()
+    const persistedResume = extractContinueUnfinishedDeepChapterContext(assistantMessage.content)
+    const visibleAssistantContent = stripContinueUnfinishedDeepChapterContext(assistantMessage.content)
+    const originalRequest =
+      persistedResume?.originalRequest ||
+      findPreviousUserRequest(active, assistantMessage.id)
+    const resumeContext = persistedResume?.resumeContext || visibleAssistantContent
+    const prompt = buildContinueUnfinishedDeepChapterPrompt({
+      originalRequest,
+      persistedOriginalRequest: persistedResume?.originalRequest,
+      failedAssistantContent: visibleAssistantContent,
+      resumeContext,
+    })
+
+    addMessage("user", "继续未完成")
+    setStreaming(true)
+
+    const sessionId = streamSessionGuardRef.current.start()
+    activeStreamSessionRef.current = sessionId
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    const deepStream = createDeepThinkingStreamRenderer()
+    let accumulated = deepStream.updateThinking("## 继续未完成\n正在基于上一轮已完成阶段继续生成，避免从头重新思考。")
+    let resumeThinking = ""
+    setStreamingContent(accumulated)
+
+    try {
+      const novelConfig = useWikiStore.getState().novelConfig
+      const writingConfig = resolveNovelModel(llmConfig, novelConfig, "writing")
+      let continuationSystemPrompt = [
+        "你是专业小说写作助手。用户正在继续一次已中断的深度章节生成，请严格基于已有思考和阶段内容往后完成，不要从头重跑已完成阶段。",
+        "如果上方恢复上下文里没有正文草稿，就从正文生成阶段继续；如果已经有正文草稿，就继续审查、返修、简单审查、去AI味或补全正文。",
+        "不要把“继续未完成”当作原始章节需求；原始章节需求必须以恢复上下文中的原始用户请求为准。",
+      ].join("\n")
+
+      if (project && originalRequest?.trim()) {
+        try {
+          const pp = normalizePath(project.path)
+          const resumeRoute = routeTask(originalRequest)
+          const goldenResume = detectGoldenThreeChapterRequest(originalRequest, resumeRoute?.chapterNumber)
+          const taskDirective = resumeRoute ? buildTaskDirective(resumeRoute) : ""
+          const goldenDirective = buildGoldenThreeChapterDirective(goldenResume)
+          const { buildContextPack, contextPackToPrompt } = await import("@/lib/novel/context-engine")
+          const contextPack = await buildContextPack(pp, originalRequest, resumeRoute?.chapterNumber)
+          const budget = novelConfig.contextTokenBudget > 0 ? novelConfig.contextTokenBudget : undefined
+          continuationSystemPrompt = [
+            continuationSystemPrompt,
+            "",
+            "## QM-QUAI 技能",
+            buildQmQuaiSystemPrompt(),
+            "",
+            taskDirective,
+            goldenDirective,
+            "",
+            "## 原始深度章节上下文包",
+            contextPackToPrompt(contextPack, budget),
+          ].filter(Boolean).join("\n")
+        } catch (err) {
+          console.warn("构建继续未完成上下文包失败:", err)
+        }
+      }
+
+      let streamError: Error | null = null
+
+      await streamChat(
+        writingConfig,
+        [
+          {
+            role: "system",
+            content: continuationSystemPrompt,
+          },
+          { role: "user", content: prompt },
+        ],
+        {
+          onToken: (token) => {
+            if (!streamSessionGuardRef.current.isActive(sessionId)) return
+            accumulated = deepStream.appendFinal(token)
+            setStreamingContent(accumulated)
+          },
+          onReasoningToken: (token) => {
+            if (!streamSessionGuardRef.current.isActive(sessionId)) return
+            resumeThinking += token
+            accumulated = deepStream.updateThinking(
+              `## 继续未完成\n正在基于上一轮已完成阶段继续生成，避免从头重新思考。\n\n${resumeThinking}`,
+            )
+            setStreamingContent(accumulated)
+          },
+          onDone: () => {},
+          onError: (err) => {
+            streamError = err
+          },
+        },
+        controller.signal,
+        { reasoning: resolveUserVisibleReasoning(writingConfig.reasoning) },
+      )
+
+      if (!streamSessionGuardRef.current.isActive(sessionId)) return
+      if (streamError) throw streamError
+
+      streamSessionGuardRef.current.finish(sessionId, () => {
+        finalizeStream(accumulated || "继续未完成失败：模型没有返回内容。", [])
+        activeStreamSessionRef.current = null
+        abortRef.current = null
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      streamSessionGuardRef.current.finish(sessionId, () => {
+        const visibleFailure = `${accumulated ? `${accumulated}\n\n` : ""}出错：继续未完成失败：${message}`
+        const inheritedResumeContext = [
+          resumeContext,
+          "",
+          "## 最近一次继续未完成失败时的输出",
+          stripContinueUnfinishedDeepChapterContext(visibleFailure),
+        ].join("\n")
+        finalizeStream(
+          appendContinueUnfinishedDeepChapterContext(visibleFailure, {
+            originalRequest,
+            resumeContext: inheritedResumeContext,
+          }),
+          undefined,
+        )
+        activeStreamSessionRef.current = null
+        abortRef.current = null
+      })
+    } finally {
+      if (activeStreamSessionRef.current === sessionId) {
+        activeStreamSessionRef.current = null
+      }
+      if (abortRef.current === controller) {
+        abortRef.current = null
+      }
+    }
+  }, [isStreaming, createConversation, addMessage, setStreaming, setStreamingContent, llmConfig, finalizeStream])
 
   const handleWriteToWiki = useCallback(async () => {
     if (!project) return
@@ -769,6 +994,7 @@ export function ChatPanel() {
                       projectPath={project?.path ?? null}
                       onSaveAsChapter={handleSaveAsChapter}
                       onContinueNextChapter={isLastAssistant ? handleContinueNextChapter : undefined}
+                      onContinueUnfinished={isLastAssistant ? () => handleContinueUnfinished(msg) : undefined}
                       saveStatus={chapterSaveStatus}
                       isSaving={isSavingChapter}
                     />

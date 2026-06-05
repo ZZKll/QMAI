@@ -76,7 +76,7 @@ export async function buildContextPack(
   const snapshotLookback = 3
 
   const resolvedChapterNumber = chapterNumber ?? extractChapterNumberFromTask(task)
-  const [outline, chapterOutline, volumeContext, snapshots, fallbackRecentSummaries, fallbackPreviousEnding, fallbackCharacterStates, fallbackForeshadowingStates, fallbackTimeline, relatedSettings, canonRules, writingStyle, searchResults, graphSearchResults, revisionFeedback, cognitionText, characterAuras, soulDoc] = await Promise.all([
+  const [outline, chapterOutline, volumeContext, snapshots, fallbackRecentSummaries, fallbackPreviousEnding, fallbackCharacterStates, fallbackForeshadowingStates, fallbackTimeline, relatedSettings, canonRules, writingStyle, searchResults, graphSearchResults, revisionFeedback, cognitionText, soulDoc] = await Promise.all([
     readOutlineContent(pp),
     readChapterOutlineContent(pp, resolvedChapterNumber),
     readVolumeContext(pp, resolvedChapterNumber),
@@ -93,7 +93,6 @@ export async function buildContextPack(
     searchGraphRelevantContent(pp, task, resolvedChapterNumber),
     loadRevisionFeedbackForContext(pp, resolvedChapterNumber, revisionFeedbackWindowConfig),
     readCognitionStates(pp),
-    buildCharacterAuraContext(pp, task),
     readSoulDoc(pp),
   ])
 
@@ -108,6 +107,15 @@ export async function buildContextPack(
   const chapterGoal = buildChapterGoal(outline, chapterOutline, resolvedChapterNumber)
   const mergedOutline = joinNonEmpty([outline, volumeContext, chapterOutline], "\n\n")
   const revisionDirectives = buildRevisionDirectives(revisionFeedback)
+  const characterAuras = await buildCharacterAuraContext(pp, task, {
+    matchingText: joinNonEmpty([
+      chapterGoal,
+      chapterOutline,
+      fallbackCharacterStates,
+      snapshots.characterStates,
+      cognitionText,
+    ], "\n\n"),
+  })
 
   return {
     task,

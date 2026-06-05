@@ -181,6 +181,12 @@ jobs:
           Copy-Item $installer.FullName $assetPath -Force
 
           $signature = (Get-Content $signaturePath -Raw).Trim()
+          $notesPath = Join-Path $releaseDir "release-notes.txt"
+          node scripts/release-notes.mjs $version --out $notesPath
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $notes = Get-Content -Path $notesPath -Raw -Encoding utf8
           $latest = [ordered]@{
             version = $version
             notes = "QMAI $version 发布版本"
@@ -194,7 +200,9 @@ jobs:
           }
 
           $latestPath = Join-Path $releaseDir "latest.json"
+          $latest.notes = $notes
           $latest | ConvertTo-Json -Depth 5 | Set-Content -Path $latestPath -Encoding utf8
+          gh release edit "${{ github.ref_name }}" --notes-file $notesPath
           gh release upload "${{ github.ref_name }}" $assetPath $latestPath --clobber
 
       - name: Package macOS app tarball

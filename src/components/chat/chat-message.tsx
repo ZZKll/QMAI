@@ -22,6 +22,7 @@ import { findRawSourceForImage, imageUrlToAbsolute } from "@/lib/raw-source-reso
 import { detectLanguage } from "@/lib/detect-language"
 import { getHtmlLang, getTextDirection } from "@/lib/language-metadata"
 import { MermaidDiagram, unwrapMermaidPre } from "@/components/mermaid-diagram"
+import { canContinueUnfinishedDeepChapter } from "./chat-resume"
 
 interface ChatMessageProps {
   message: DisplayMessage
@@ -31,17 +32,21 @@ interface ChatMessageProps {
   projectPath?: string | null
   onSaveAsChapter?: (content: string) => void
   onContinueNextChapter?: () => void
+  onContinueUnfinished?: () => void
   onSaveAsDraft?: (content: string) => void
   onDiscardDraft?: () => void
   saveStatus?: string
   isSaving?: boolean
 }
 
-export function ChatMessage({ message, isLastAssistant, onRegenerate, novelMode, projectPath, onSaveAsChapter, onContinueNextChapter, saveStatus, isSaving }: ChatMessageProps) {
+export function ChatMessage({ message, isLastAssistant, onRegenerate, novelMode, projectPath, onSaveAsChapter, onContinueNextChapter, onContinueUnfinished, saveStatus, isSaving }: ChatMessageProps) {
   const isUser = message.role === "user"
   const isSystem = message.role === "system"
   const isAssistant = message.role === "assistant"
   const [hovered, setHovered] = useState(false)
+  const canResumeUnfinished = Boolean(
+    novelMode && isLastAssistant && onContinueUnfinished && canContinueUnfinishedDeepChapter(message.content),
+  )
 
   return (
     <div
@@ -81,6 +86,11 @@ export function ChatMessage({ message, isLastAssistant, onRegenerate, novelMode,
         {isAssistant && !message.discarded && <CitedReferencesPanel content={message.content} savedReferences={message.references} />}
         {isAssistant && !message.discarded && (
           <div className="flex items-center gap-1 flex-wrap">
+            {canResumeUnfinished && (
+              <div className="basis-full rounded-md border border-amber-500/30 bg-amber-50/60 px-2 py-1.5 text-[11px] leading-5 text-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
+                这次深度生成已经完成了部分思考过程。点击“继续未完成”会基于上方已有阶段继续往后生成，通常比“重新生成”更节省 token；如果前面的思考方向本身不对，再使用“重新生成”。
+              </div>
+            )}
             {novelMode && isLastAssistant && onSaveAsChapter && (
               <button
                 type="button"
@@ -99,6 +109,17 @@ export function ChatMessage({ message, isLastAssistant, onRegenerate, novelMode,
                 className="rounded border border-border px-2 py-0.5 text-[11px] text-foreground hover:bg-accent disabled:opacity-50"
               >
                 继续生成下一章
+              </button>
+            )}
+            {canResumeUnfinished && (
+              <button
+                type="button"
+                onClick={onContinueUnfinished}
+                disabled={isSaving}
+                className="rounded border border-amber-500/40 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800 hover:bg-amber-100 disabled:opacity-50 dark:bg-amber-950/20 dark:text-amber-300 dark:hover:bg-amber-950/35"
+                title="基于已有思考过程继续生成，减少重复消耗"
+              >
+                继续未完成
               </button>
             )}
             {(hovered || (novelMode && isLastAssistant)) && (

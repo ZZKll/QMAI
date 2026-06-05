@@ -1,4 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server"
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { StreamingMessage } from "./chat-message"
 import { getDeepChapterToggleButtonClass } from "./chat-panel"
@@ -42,5 +44,29 @@ describe("deep chapter thinking toggle style", () => {
     expect(activeClassName).toContain("text-primary-foreground")
     expect(activeClassName).toContain("border-primary")
     expect(inactiveClassName).not.toContain("bg-primary")
+  })
+})
+
+describe("deep chapter unfinished continuation action", () => {
+  it("shows a continuation button and explanation for failed deep chapter thinking", () => {
+    const source = readFileSync(resolve(__dirname, "chat-message.tsx"), "utf8")
+
+    expect(source).toContain("onContinueUnfinished")
+    expect(source).toContain("继续未完成")
+    expect(source).toContain("节省 token")
+    expect(source).toContain("canContinueUnfinishedDeepChapter")
+  })
+
+  it("wires the continuation action through chat panel without rerunning regenerate", () => {
+    const source = readFileSync(resolve(__dirname, "chat-panel.tsx"), "utf8")
+
+    expect(source).toContain("handleContinueUnfinished")
+    expect(source).toContain("buildContinueUnfinishedDeepChapterPrompt")
+    expect(source).toContain("appendContinueUnfinishedDeepChapterContext")
+    expect(source).toContain("extractContinueUnfinishedDeepChapterContext")
+    expect(source).toContain("contextPackToPrompt")
+    expect(source).toContain('addMessage("user", "继续未完成")')
+    expect(source).toContain("resolveNovelModel")
+    expect(source).toContain("onContinueUnfinished={isLastAssistant ? () => handleContinueUnfinished(msg) : undefined}")
   })
 })

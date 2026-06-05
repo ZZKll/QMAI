@@ -9,12 +9,17 @@ import type { TaskRouteResult } from "./task-router"
 import type { GoldenThreeChapterRequest } from "./golden-three-chapters"
 import {
   DEEP_CHAPTER_HARD_MAX_CHARS,
+  DEEP_CHAPTER_LENGTH_OPTIMIZATION_MAX_ATTEMPTS,
   DEEP_CHAPTER_MAX_OUTPUT_TOKENS,
   DEEP_CHAPTER_MIN_CHARS,
+  DEEP_CHAPTER_OPTIMIZED_MAX_CHARS,
+  DEEP_CHAPTER_OPTIMIZED_MIN_CHARS,
+  DEEP_CHAPTER_REWRITE_MAX_CHARS,
   buildDeepChapterBriefPrompt,
   buildDeepChapterDraftPrompt,
   buildDeepChapterExpansionPrompt,
   buildDeepChapterFinalPolishPrompt,
+  buildDeepChapterLengthRewritePrompt,
   buildDeepChapterRevisionPrompt,
 } from "./deep-chapter-prompts"
 
@@ -142,19 +147,38 @@ export async function runDeepChapterGeneration(
     )
     assertNotAborted(signal)
   }
+  draftContent = await optimizeChapterLengthIfNeeded(
+    "阶段4：字数审核与正文优化",
+    draftContent,
+    writingConfig,
+    contextPrompt,
+    taskBrief,
+    input,
+    callbacks,
+    deps,
+    signal,
+  )
   callbacks.onThinking?.(formatStageThinking("阶段3：正文初稿", [
     draftContent,
     "",
-    `初稿生成完成，约 ${draftContent.length} 字。`,
+    `初稿生成完成，约 ${countChapterChars(draftContent)} 字。`,
   ].join("\n")))
 
+  callbacks.onThinking?.(formatStageThinking(
+    "阶段4：AI审稿",
+    "正在检查正文完整性、剧情连续性、是否被截断以及是否存在阻断问题。",
+  ))
   const reviewResults = await deps.reviewChapter(input.projectPath, draftContent, input.chapterNumber)
   assertNotAborted(signal)
   callbacks.onThinking?.(formatReviewThinking(reviewResults))
 
   const blockingIssues = reviewResults.filter((item) => item.severity === "error")
   if (blockingIssues.length === 0) {
-    const finalContent = await finalPolishChapter(
+    callbacks.onThinking?.(formatStageThinking(
+      "阶段5：无需自动返修",
+      "AI审稿未发现阻断问题，跳过自动返修，进入阶段6简单审查与字数检查。",
+    ))
+    const finalContent = await finalPolishChapterWithLengthGate(
       writingConfig,
       contextPrompt,
       taskBrief,
@@ -226,7 +250,7 @@ export async function runDeepChapterGeneration(
       `返修后正文约 ${revisedContent.length} 字。`,
     ].join("\n"),
   ))
-  const finalContent = await finalPolishChapter(
+  const finalContent = await finalPolishChapterWithLengthGate(
     writingConfig,
     contextPrompt,
     taskBrief,
@@ -245,6 +269,250 @@ export async function runDeepChapterGeneration(
     reviewResults,
     revised: true,
   }
+}
+
+async function finalPolishChapterWithLengthGate(
+  writingConfig: LlmConfig,
+  contextPrompt: string,
+  taskBrief: string,
+  currentContent: string,
+  input: DeepChapterGenerationInput,
+  callbacks: DeepChapterGenerationCallbacks,
+  deps: DeepChapterGenerationDeps,
+  signal?: AbortSignal,
+): Promise<string> {
+  const polished = await finalPolishChapter(
+    writingConfig,
+    contextPrompt,
+    taskBrief,
+    currentContent,
+    input,
+    callbacks,
+    deps,
+    signal,
+  )
+  const polishedChars = countChapterChars(polished)
+  if (isWithinOptimizedLength(polishedChars)) {
+    return polished
+  }
+
+  if (polishedChars > DEEP_CHAPTER_OPTIMIZED_MAX_CHARS) {
+    const rewritten = await optimizeChapterLengthStrict(
+      "阶段6：字数检查与正文优化",
+      polished,
+      writingConfig,
+      contextPrompt,
+      taskBrief,
+      input,
+      callbacks,
+      deps,
+      signal,
+    )
+    const repolished = await finalPolishChapter(
+      writingConfig,
+      contextPrompt,
+      taskBrief,
+      rewritten,
+      input,
+      callbacks,
+      deps,
+      signal,
+    )
+    const repolishedChars = countChapterChars(repolished)
+    if (isWithinOptimizedLength(repolishedChars)) {
+      return repolished
+    }
+    if (repolishedChars > DEEP_CHAPTER_OPTIMIZED_MAX_CHARS) {
+      return optimizeChapterLengthStrict(
+        "阶段6：字数检查与正文优化",
+        repolished,
+        writingConfig,
+        contextPrompt,
+        taskBrief,
+        input,
+        callbacks,
+        deps,
+        signal,
+      )
+    }
+    callbacks.onThinking?.(formatStageThinking(
+      "阶段6：字数检查未达标",
+      "再次简单审查后字数被压缩，已保留阶段3控字重写后的版本作为最终正文，避免章节再次缩水。",
+    ))
+    return rewritten
+  }
+
+  callbacks.onThinking?.(formatStageThinking(
+    "阶段6：字数检查未达标",
+    `简单审查后正文约 ${polishedChars} 字，低于 ${DEEP_CHAPTER_MIN_CHARS} 字最低要求，自动回到阶段3扩写补足。`,
+  ))
+
+  const expandedContent = await collectModelText(
+    writingConfig,
+    [{
+      role: "user",
+      content: buildDeepChapterExpansionPrompt(
+        contextPrompt,
+        taskBrief,
+        polished,
+        input.userRequest,
+        input.chapterNumber,
+        input.goldenThreeChapter,
+      ),
+    }],
+    deps,
+    signal,
+    (partial) => callbacks.onThinking?.(formatStageThinking("阶段3：正文扩写补足", partial)),
+    { max_tokens: DEEP_CHAPTER_MAX_OUTPUT_TOKENS },
+  )
+  assertNotAborted(signal)
+  const lengthCheckedExpandedContent = await optimizeChapterLengthIfNeeded(
+    "阶段6：字数检查与正文优化",
+    expandedContent,
+    writingConfig,
+    contextPrompt,
+    taskBrief,
+    input,
+    callbacks,
+    deps,
+    signal,
+  )
+
+  callbacks.onThinking?.(formatStageThinking(
+    "阶段3：正文扩写补足",
+    [
+      `已根据阶段6字数检查补足正文，扩写后约 ${countChapterChars(lengthCheckedExpandedContent)} 字。`,
+      "",
+      lengthCheckedExpandedContent,
+    ].join("\n"),
+  ))
+
+  const repolished = await finalPolishChapter(
+    writingConfig,
+    contextPrompt,
+    taskBrief,
+    lengthCheckedExpandedContent,
+    input,
+    callbacks,
+    deps,
+    signal,
+  )
+  const repolishedChars = countChapterChars(repolished)
+  if (repolishedChars > DEEP_CHAPTER_OPTIMIZED_MAX_CHARS) {
+    return optimizeChapterLengthStrict(
+      "阶段6：字数检查与正文优化",
+      repolished,
+      writingConfig,
+      contextPrompt,
+      taskBrief,
+      input,
+      callbacks,
+      deps,
+      signal,
+    )
+  }
+  if (repolishedChars >= DEEP_CHAPTER_MIN_CHARS || repolishedChars >= countChapterChars(lengthCheckedExpandedContent)) {
+    return repolished
+  }
+
+  callbacks.onThinking?.(formatStageThinking(
+    "阶段6：字数检查未达标",
+    "再次简单审查后字数仍被压缩，已保留扩写补足后的版本作为最终正文，避免章节再次缩水。",
+  ))
+  return lengthCheckedExpandedContent
+}
+
+function isWithinOptimizedLength(chars: number): boolean {
+  return chars >= DEEP_CHAPTER_OPTIMIZED_MIN_CHARS && chars <= DEEP_CHAPTER_OPTIMIZED_MAX_CHARS
+}
+
+async function optimizeChapterLengthIfNeeded(
+  stageTitle: string,
+  currentContent: string,
+  writingConfig: LlmConfig,
+  contextPrompt: string,
+  taskBrief: string,
+  input: DeepChapterGenerationInput,
+  callbacks: DeepChapterGenerationCallbacks,
+  deps: DeepChapterGenerationDeps,
+  signal?: AbortSignal,
+): Promise<string> {
+  const currentChars = countChapterChars(currentContent)
+  if (isWithinOptimizedLength(currentChars)) return currentContent
+  return optimizeChapterLengthStrict(
+    stageTitle,
+    currentContent,
+    writingConfig,
+    contextPrompt,
+    taskBrief,
+    input,
+    callbacks,
+    deps,
+    signal,
+  )
+}
+
+async function optimizeChapterLengthStrict(
+  stageTitle: string,
+  currentContent: string,
+  writingConfig: LlmConfig,
+  contextPrompt: string,
+  taskBrief: string,
+  input: DeepChapterGenerationInput,
+  callbacks: DeepChapterGenerationCallbacks,
+  deps: DeepChapterGenerationDeps,
+  signal?: AbortSignal,
+): Promise<string> {
+  let content = currentContent
+  for (let attempt = 1; attempt <= DEEP_CHAPTER_LENGTH_OPTIMIZATION_MAX_ATTEMPTS; attempt += 1) {
+    const currentChars = countChapterChars(content)
+    if (isWithinOptimizedLength(currentChars)) return content
+
+    callbacks.onThinking?.(formatStageThinking(
+      stageTitle,
+      `当前正文约 ${currentChars} 字，正在基于阶段3正文草稿做内容优化（第 ${attempt}/${DEEP_CHAPTER_LENGTH_OPTIMIZATION_MAX_ATTEMPTS} 次）。目标严格控制在 ${DEEP_CHAPTER_OPTIMIZED_MIN_CHARS}-${DEEP_CHAPTER_OPTIMIZED_MAX_CHARS} 字；如果优化后仍超过 ${DEEP_CHAPTER_REWRITE_MAX_CHARS} 字，会继续优化。`,
+    ))
+
+    content = await collectModelText(
+      writingConfig,
+      [{
+        role: "user",
+        content: buildDeepChapterLengthRewritePrompt(
+          contextPrompt,
+          taskBrief,
+          content,
+          input.userRequest,
+          input.chapterNumber,
+          input.goldenThreeChapter,
+        ),
+      }],
+      deps,
+      signal,
+      (partial) => callbacks.onThinking?.(formatStageThinking(stageTitle, partial)),
+      { max_tokens: DEEP_CHAPTER_MAX_OUTPUT_TOKENS },
+    )
+    assertNotAborted(signal)
+    const optimizedChars = countChapterChars(content)
+    callbacks.onThinking?.(formatStageThinking(
+      stageTitle,
+      [
+        `第 ${attempt} 次优化完成，当前约 ${optimizedChars} 字。`,
+        "",
+        content,
+      ].join("\n"),
+    ))
+    if (isWithinOptimizedLength(optimizedChars)) return content
+  }
+
+  const finalChars = countChapterChars(content)
+  if (finalChars > DEEP_CHAPTER_REWRITE_MAX_CHARS) {
+    throw new Error(
+      `阶段4字数优化已连续尝试 ${DEEP_CHAPTER_LENGTH_OPTIMIZATION_MAX_ATTEMPTS} 次，正文仍超过 ${DEEP_CHAPTER_REWRITE_MAX_CHARS} 字，已终止。请降低本章目标字数或拆成两章生成。`,
+    )
+  }
+  throw new Error(
+    `阶段4字数优化已连续尝试 ${DEEP_CHAPTER_LENGTH_OPTIMIZATION_MAX_ATTEMPTS} 次，正文仍未控制在 ${DEEP_CHAPTER_OPTIMIZED_MIN_CHARS}-${DEEP_CHAPTER_OPTIMIZED_MAX_CHARS} 字，已终止。请降低本章目标字数或拆成两章生成。`,
+  )
 }
 
 async function finalPolishChapter(
