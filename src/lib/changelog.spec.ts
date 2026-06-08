@@ -2,14 +2,16 @@ import { describe, expect, it } from "vitest"
 import { allChangelog, currentVersionChangelog } from "./changelog"
 
 describe("changelog", () => {
-  it("shows the 2.2.7 release before earlier visible releases", () => {
+  it("shows the 2.2.9 release before earlier visible releases", () => {
     const entries = allChangelog()
     const versions = entries.map((entry) => entry.version)
 
-    expect(versions[0]).toBe("2.2.7")
-    expect(versions[1]).toBe("2.2.0")
-    expect(versions[2]).toBe("2.1.0")
-    expect(versions[3]).toBe("2.0.0")
+    expect(versions[0]).toBe("2.2.9")
+    expect(versions[1]).toBe("2.2.8")
+    expect(versions[2]).toBe("2.2.7")
+    expect(versions[3]).toBe("2.2.0")
+    expect(versions[4]).toBe("2.1.0")
+    expect(versions[5]).toBe("2.0.0")
 
     for (let patch = 1; patch <= 6; patch += 1) {
       expect(versions).not.toContain(`2.2.${patch}`)
@@ -65,5 +67,33 @@ describe("changelog", () => {
     expect(zh).toContain("阶段快照")
     expect(zh).toContain("第一次中断时的原始阶段链")
     expect(zh).toContain("切换了模型")
+  })
+  it("returns the 2.2.8 changelog entry for accepted PR sync without reduced review retrieval", () => {
+    const release = currentVersionChangelog("2.2.8")[0]
+    const zh = release.highlights.zh.join("\n")
+    const en = release.highlights.en.join("\n")
+
+    expect(release.version).toBe("2.2.8")
+    expect(en).toContain("review-context retrieval complete")
+    expect(en).toContain("vector search, graph search, and reranking")
+    expect(en).toContain("selected chapter file names")
+    expect(en).toContain("different projects no longer share retrieval graphs")
+    expect(zh).toContain("保留完整审稿上下文检索")
+    expect(zh).toContain("向量检索、图谱检索和重排序")
+    expect(zh).toContain("避免旧 frontmatter 章节号")
+    expect(zh).toContain("不同项目即使 dataVersion 相同")
+  })
+
+  it("returns the 2.2.9 changelog entry for deep chapter length control", () => {
+    const release = currentVersionChangelog("2.2.9")[0]
+    const zh = release.highlights.zh.join("\n")
+    const en = release.highlights.en.join("\n")
+
+    expect(release.version).toBe("2.2.9")
+    expect(en).toContain("3,500-character cap")
+    expect(en).toContain("6,000 characters")
+    expect(zh).toContain("正文草稿最多 3500 字")
+    expect(zh).toContain("上限调整为 6000 字")
+    expect(zh).toContain("避免流程反复中断")
   })
 })

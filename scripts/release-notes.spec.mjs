@@ -11,11 +11,9 @@ describe("release notes for updater manifest", () => {
 
     expect(notes).not.toBe("QMAI 2.2.1 发布版本")
     expect(notes).toContain("1. ")
-    expect(notes).toContain("拆文库做隐藏处理")
-    expect(notes).toContain("2.2.6 到 2.2.1 的更新日志展示")
-    expect(notes).toContain("继续未完成")
-    expect(notes).toContain("阶段快照")
-    expect(notes).toContain("切换了模型")
+    expect(notes).toContain("正文草稿最多 3500 字")
+    expect(notes).toContain("上限调整为 6000 字")
+    expect(notes).toContain("避免流程反复中断")
     expect(notes).not.toContain("联系方式")
   })
 

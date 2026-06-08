@@ -1,24 +1,21 @@
-import { useEffect, useMemo, useState } from "react"
-import { BookOpenCheck, CheckCircle2, FilePlus2, FolderPlus, Loader2, Play, RefreshCw } from "lucide-react"
+import { useEffect, useState } from "react"
+import { BookOpenCheck, CheckCircle2, Loader2, Play, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { preprocessFile, readFile } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
 import { streamChat, type ChatMessage } from "@/lib/llm-client"
 import { resolveNovelModel } from "@/lib/novel/model-resolver"
 import {
   buildDismantlingAnalysisPrompt,
+  buildDismantlingWebResearchPrompt,
   extractStructureMemoryFromAnalysis,
   loadDismantlingLibrary,
   saveDismantlingLibrary,
   selectNextDismantlingBatch,
-  splitDismantlingTextIntoChapters,
   type DismantlingAnalysis,
   type DismantlingChapter,
-  type DismantlingLibrary,
   type DismantlingProject,
 } from "@/lib/novel/dismantling"
-import { collectChapterImportCandidatesFromFolder, sortChapterImportCandidates, type ChapterImportCandidate } from "@/lib/novel/chapter-import"
-import { getFileName, getFileStem, normalizePath } from "@/lib/path-utils"
+import { buildWebResearchContext, collectWebResearch } from "@/lib/web-research"
 
 const DEFAULT_BATCH_SIZE = 3
 
@@ -26,125 +23,42 @@ export function DismantlingView() {
   const project = useWikiStore((state) => state.project)
   const llmConfig = useWikiStore((state) => state.llmConfig)
   const novelConfig = useWikiStore((state) => state.novelConfig)
-  const [library, setLibrary] = useState<DismantlingLibrary>({ version: 1, projects: [], selectedProjectId: null })
+  const dataVersion = useWikiStore((state) => state.dataVersion)
+  const selectedDismantlingProjectId = useWikiStore((state) => state.selectedDismantlingProjectId)
+  const bumpDataVersion = useWikiStore((state) => state.bumpDataVersion)
+  const [selectedProject, setSelectedProject] = useState<DismantlingProject | null>(null)
   const [selectedChapterIds, setSelectedChapterIds] = useState<string[]>([])
   const [batchSize, setBatchSize] = useState(DEFAULT_BATCH_SIZE)
-  const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState("")
-
-  const selectedProject = useMemo(
-    () => library.projects.find((item) => item.id === library.selectedProjectId) ?? library.projects[0] ?? null,
-    [library],
-  )
+  const [webResearchInput, setWebResearchInput] = useState("")
 
   useEffect(() => {
-    if (!project) {
-      setLibrary({ version: 1, projects: [], selectedProjectId: null })
+    if (!project || !selectedDismantlingProjectId) {
+      setSelectedProject(null)
       return
     }
     let cancelled = false
-    setLoading(true)
     void loadDismantlingLibrary(project.path)
       .then((value) => {
         if (cancelled) return
-        setLibrary(value)
-        const first = value.projects.find((item) => item.id === value.selectedProjectId) ?? value.projects[0]
-        setSelectedChapterIds(first?.chapters.map((chapter) => chapter.id) ?? [])
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
+        const found = value.projects.find((item) => item.id === selectedDismantlingProjectId)
+        setSelectedProject(found ?? null)
+        setSelectedChapterIds(found?.chapters.map((chapter) => chapter.id) ?? [])
       })
     return () => {
       cancelled = true
     }
-  }, [project])
-
-  const persistLibrary = async (next: DismantlingLibrary) => {
-    if (!project) return
-    setLibrary(next)
-    await saveDismantlingLibrary(project.path, next)
-  }
+  }, [project, dataVersion, selectedDismantlingProjectId])
 
   const upsertSelectedProject = async (updater: (current: DismantlingProject) => DismantlingProject) => {
-    if (!selectedProject) return
-    const nextProjects = library.projects.map((item) => item.id === selectedProject.id ? updater(item) : item)
-    await persistLibrary({ ...library, projects: nextProjects, selectedProjectId: selectedProject.id })
-  }
-
-  const importCandidates = async (candidates: ChapterImportCandidate[], titleFallback: string) => {
-    if (!project) return
-    setStatus("正在导入拆文资料...")
-    const chapters: DismantlingChapter[] = []
-    const sorted = sortChapterImportCandidates(candidates)
-    for (const candidate of sorted) {
-      let content = ""
-      try {
-        content = await preprocessFile(candidate.path)
-      } catch {
-        content = await readFile(candidate.path)
-      }
-      const split = splitDismantlingTextIntoChapters(content)
-      if (split.length <= 1) {
-        const chapterNumber = chapters.length + 1
-        chapters.push({
-          id: `chapter-${String(chapterNumber).padStart(3, "0")}`,
-          chapterNumber,
-          title: split[0]?.title === "第1章" ? getFileStem(candidate.name) || `第${chapterNumber}章` : split[0]?.title ?? getFileStem(candidate.name),
-          content: split[0]?.content || content,
-          status: "pending",
-        })
-      } else {
-        for (const item of split) {
-          chapters.push({ ...item, id: `chapter-${String(chapters.length + 1).padStart(3, "0")}`, chapterNumber: chapters.length + 1 })
-        }
-      }
-    }
-
-    if (chapters.length === 0) {
-      setStatus("没有找到可导入的章节。")
-      return
-    }
-
-    const now = Date.now()
-    const nextProject: DismantlingProject = {
-      id: `dismantling-${now}`,
-      title: titleFallback || "未命名拆文作品",
-      createdAt: now,
-      updatedAt: now,
-      chapters,
-      analyses: [],
-      structureMemory: [],
-      useInChat: false,
-    }
-    const nextLibrary = {
-      ...library,
-      projects: [nextProject, ...library.projects],
-      selectedProjectId: nextProject.id,
-    }
-    await persistLibrary(nextLibrary)
-    setSelectedChapterIds(chapters.map((chapter) => chapter.id))
-    setStatus(`已导入 ${chapters.length} 章，内容只保存到独立拆文记忆库，不会写入小说记忆。`)
-  }
-
-  const handleImportFiles = async () => {
-    const { open } = await import("@tauri-apps/plugin-dialog")
-    const selected = await open({
-      multiple: true,
-      filters: [{ name: "文档", extensions: ["txt", "md", "mdx", "doc", "docx"] }],
-    })
-    const paths = Array.isArray(selected) ? selected : selected ? [selected] : []
-    if (paths.length === 0) return
-    const candidates = paths.map((path) => ({ path: normalizePath(path), name: getFileName(path) }))
-    await importCandidates(candidates, getFileStem(candidates[0]?.name ?? "") || "拆文作品")
-  }
-
-  const handleImportFolder = async () => {
-    const { open } = await import("@tauri-apps/plugin-dialog")
-    const selected = await open({ directory: true })
-    if (!selected || Array.isArray(selected)) return
-    const candidates = await collectChapterImportCandidatesFromFolder(selected)
-    await importCandidates(candidates, getFileName(selected) || "拆文作品")
+    if (!selectedProject || !project) return
+    const updated = updater(selectedProject)
+    const fullLibrary = await loadDismantlingLibrary(project.path)
+    const nextProjects = fullLibrary.projects.map((item) => item.id === selectedProject.id ? updated : item)
+    await saveDismantlingLibrary(project.path, { ...fullLibrary, projects: nextProjects })
+    setSelectedProject(updated)
+    bumpDataVersion()
   }
 
   const handleRunDismantling = async () => {
@@ -211,6 +125,71 @@ export function DismantlingView() {
     }
   }
 
+  const handleRunWebDismantlingResearch = async () => {
+    if (!project || !selectedProject || running) return
+    const request = webResearchInput.trim()
+    if (!request) {
+      setStatus("请先输入要搜索的热门方向、榜单关键词或网页地址。")
+      return
+    }
+
+    setRunning(true)
+    setStatus("正在联网读取网页资料并进行热门分析，请稍候。")
+    let output = ""
+    try {
+      const webResearch = await collectWebResearch({
+        text: request,
+        searchApiConfig: useWikiStore.getState().searchApiConfig,
+        maxSearchResults: 6,
+        maxImportedDocuments: 4,
+      })
+      const webResearchContext = buildWebResearchContext(webResearch)
+      const messages: ChatMessage[] = [
+        { role: "system", content: "你是严谨的小说拆文和热门趋势分析助手，必须用中文输出结构化结果。" },
+        {
+          role: "user",
+          content: buildDismantlingWebResearchPrompt({
+            projectTitle: selectedProject.title,
+            userRequest: request,
+            webResearchContext: webResearchContext.markdown,
+          }),
+        },
+      ]
+      await new Promise<void>((resolve, reject) => {
+        void streamChat(
+          resolveNovelModel(llmConfig, novelConfig, "extract"),
+          messages,
+          {
+            onToken: (token) => { output += token },
+            onDone: resolve,
+            onError: reject,
+          },
+        )
+      })
+      const memory = extractStructureMemoryFromAnalysis(output)
+      const analysis: DismantlingAnalysis = {
+        id: `web-analysis-${Date.now()}`,
+        chapterIds: [],
+        title: "网页热门分析",
+        createdAt: Date.now(),
+        markdown: output,
+        structureMemory: memory,
+      }
+      await upsertSelectedProject((current) => ({
+        ...current,
+        updatedAt: Date.now(),
+        analyses: [analysis, ...current.analyses],
+        structureMemory: mergeUnique([...memory, ...current.structureMemory]).slice(0, 120),
+      }))
+      setStatus(`网页热门分析完成，参考来源 ${webResearchContext.sources.length} 条，新增 ${memory.length} 条结构记忆。`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setStatus(`网页热门分析失败：${message}`)
+    } finally {
+      setRunning(false)
+    }
+  }
+
   const toggleUseInChat = async (checked: boolean) => {
     await upsertSelectedProject((current) => ({ ...current, useInChat: checked, updatedAt: Date.now() }))
     setStatus(checked ? "已启用：AI 会话会在用户写作时参考拆文结构。" : "已关闭：AI 会话不会读取该拆文结构。")
@@ -229,52 +208,13 @@ export function DismantlingView() {
       <header className="border-b px-5 py-3">
         <div className="flex items-center gap-2 text-sm text-primary">
           <BookOpenCheck className="h-4 w-4" />
-          <span>独立拆文记忆库</span>
+          <span>拆文库 · 独立拆文记忆库</span>
           <span className="text-muted-foreground">— 拆文结果独立保存，不会写入小说记忆、章节记忆或大纲记忆。</span>
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_380px]">
-        {/* Column 1: 拆文作品列表（含导入按钮） */}
-        <aside className="min-h-0 border-r bg-muted/20 flex flex-col">
-          <div className="border-b p-3">
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-medium">拆文作品</div>
-              <div className="flex gap-1.5">
-                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleImportFiles}>
-                  <FilePlus2 className="mr-1 h-3.5 w-3.5" />
-                  导入文件
-                </Button>
-                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleImportFolder}>
-                  <FolderPlus className="mr-1 h-3.5 w-3.5" />
-                  导入文件夹
-                </Button>
-              </div>
-            </div>
-          </div>
-          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-            {loading ? (
-              <div className="text-sm text-muted-foreground">正在读取拆文库...</div>
-            ) : library.projects.length === 0 ? (
-              <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">还没有拆文作品，使用上方按钮导入。</div>
-            ) : library.projects.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  setLibrary({ ...library, selectedProjectId: item.id })
-                  setSelectedChapterIds(item.chapters.map((chapter) => chapter.id))
-                }}
-                className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition ${selectedProject?.id === item.id ? "border-primary bg-primary/10" : "bg-background hover:bg-muted"}`}
-              >
-                <div className="font-medium truncate">{item.title}</div>
-                <div className="mt-1 text-xs text-muted-foreground">{item.chapters.length} 章 · {item.structureMemory.length} 条结构记忆</div>
-              </button>
-            ))}
-          </div>
-        </aside>
-
-        {/* Column 2: 章节详情与拆文操作 */}
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_380px]">
+        {/* 第三栏：作品详情、自动章节识别与拆文操作 */}
         <main className="min-h-0 flex flex-col overflow-hidden border-r">
           {!selectedProject ? (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">请从左侧选择拆文作品</div>
@@ -283,8 +223,11 @@ export function DismantlingView() {
               <div className="border-b px-4 py-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h2 className="text-base font-semibold">{selectedProject.title}</h2>
-                    <p className="mt-0.5 text-xs text-muted-foreground">{selectedProject.chapters.length} 章 · {selectedProject.structureMemory.length} 条结构记忆</p>
+                    <div className="text-xs font-medium text-muted-foreground">作品详情</div>
+                    <h2 className="mt-1 text-base font-semibold">{selectedProject.title}</h2>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      已自动识别章节结构：{selectedProject.chapters.length} 章 · {selectedProject.structureMemory.length} 条结构记忆
+                    </p>
                   </div>
                 </div>
               </div>
@@ -306,9 +249,35 @@ export function DismantlingView() {
                   <p className="mt-2 text-xs leading-5 text-muted-foreground">只学习节奏、冲突推进、爽点安排和章节钩子；不得复用原作人物、设定、剧情和具体表达。</p>
                 </section>
 
+                <section className="rounded-lg border bg-card p-3">
+                  <div className="mb-2 text-sm font-medium">网页热门分析</div>
+                  <p className="mb-2 text-xs leading-5 text-muted-foreground">
+                    输入榜单关键词、题材方向或网页地址，AI 会联网读取资料并生成拆文结构分析；结果只写入独立拆文记忆库。
+                  </p>
+                  <textarea
+                    value={webResearchInput}
+                    onChange={(event) => setWebResearchInput(event.target.value)}
+                    placeholder="例如：搜索番茄都市脑洞热门开篇套路；或粘贴需要分析的网页地址"
+                    className="min-h-20 w-full resize-y rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/30"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-2 w-full"
+                    onClick={handleRunWebDismantlingResearch}
+                    disabled={running || !webResearchInput.trim()}
+                  >
+                    {running ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+                    {running ? "分析中..." : "开始网页热门分析"}
+                  </Button>
+                </section>
+
                 <section className="rounded-lg border bg-card">
                   <div className="flex items-center justify-between border-b px-4 py-2.5">
-                    <div className="text-sm font-medium">章节列表</div>
+                    <div>
+                      <div className="text-sm font-medium">拆分章节</div>
+                      <div className="mt-0.5 text-xs text-muted-foreground">AI 会按导入内容自动拆分或识别章节结构，请选择本次要拆文的章节范围。</div>
+                    </div>
                     <div className="flex items-center gap-3">
                       <div className="flex gap-1">
                         <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setSelectedChapterIds(selectedProject.chapters.map((chapter) => chapter.id))}>全选</Button>
@@ -352,12 +321,17 @@ export function DismantlingView() {
           )}
         </main>
 
-        {/* Column 3: 拆文结果 */}
+        {/* 第四栏：拆文结果 */}
         <aside className="min-h-0 overflow-y-auto bg-muted/20 p-4">
           {!selectedProject ? (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">选择作品后，拆文结果将显示在此处。</div>
           ) : (
             <div className="space-y-4">
+              <div>
+                <div className="text-sm font-semibold">拆文结果</div>
+                <p className="mt-1 text-xs text-muted-foreground">这里只展示拆文输出与结构记忆，不写入小说正文、大纲或小说记忆。</p>
+              </div>
+
               <section className="rounded-lg border bg-card p-3">
                 <div className="mb-2 text-sm font-medium">结构记忆</div>
                 {selectedProject.structureMemory.length === 0 ? (
@@ -407,4 +381,3 @@ function StatusBadge({ status }: { status: DismantlingChapter["status"] }) {
 function mergeUnique(items: string[]): string[] {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))]
 }
-

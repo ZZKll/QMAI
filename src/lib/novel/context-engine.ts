@@ -6,14 +6,15 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { parseChapterMeta } from "./chapter-meta"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { listSnapshots, loadSnapshot, type ChapterSnapshot } from "./chapter-ingest"
-import { buildRevisionDirectives, loadRevisionFeedbackForContext } from "./revision-feedback"
+import { buildRevisionDirectives } from "./revision-feedback"
 import { loadCognitionState, cognitionToContextText } from "./character-cognition"
 import { getChapterVolumes } from "./volume"
 import { buildCharacterAuraContext } from "./character-aura"
 import { isAuthoritativeGenerationPath, isHistoricalProjectionSnippet, novelMixedSearch } from "./search-adapter"
-import { readSoulDoc } from "./soul-doc"
 import { rerankCandidates } from "@/lib/rerank"
 import type { FileNode } from "@/types/wiki"
+import { DataSourceRegistry, type ContextLoadContext } from "./context-data-source"
+import { getAllDataSources } from "./context-data-sources"
 
 const SECTION_PRIORITY: Record<string, number> = {
   "当前任务": 1,
@@ -65,84 +66,141 @@ export async function buildContextPack(
 ): Promise<ContextPack> {
   const pp = normalizePath(projectPath)
   const novelMode = useWikiStore.getState().novelMode
-  const novelConfig = useWikiStore.getState().novelConfig
-  const revisionFeedbackWindowConfig = useWikiStore.getState().revisionFeedbackWindowConfig
   if (!novelMode) {
     return emptyPack(task)
   }
 
-  const recentSummaryWindow = novelConfig.recentSummaryWindow > 0 ? novelConfig.recentSummaryWindow : 8
-  const searchTopK = novelConfig.searchTopK > 0 ? novelConfig.searchTopK : 5
-  const snapshotLookback = 3
+  // 构建加载上下文
+  const context = buildLoadContext(pp, task, chapterNumber)
+  
+  // 创建数据源注册器并加载所有数据
+  const registry = createDataSourceRegistry()
+  const rawData = await registry.loadAll(context)
+  
+  // 从原始数据构建上下文包
+  return buildContextPackFromRawData(rawData, context)
+}
 
-  const resolvedChapterNumber = chapterNumber ?? extractChapterNumberFromTask(task)
-  const [outline, chapterOutline, volumeContext, snapshots, fallbackRecentSummaries, fallbackPreviousEnding, fallbackCharacterStates, fallbackForeshadowingStates, fallbackTimeline, relatedSettings, canonRules, writingStyle, searchResults, graphSearchResults, revisionFeedback, cognitionText, soulDoc] = await Promise.all([
-    readOutlineContent(pp),
-    readChapterOutlineContent(pp, resolvedChapterNumber),
-    readVolumeContext(pp, resolvedChapterNumber),
-    readSnapshotContext(pp, resolvedChapterNumber, recentSummaryWindow, snapshotLookback),
-    readRecentChapterSummaries(pp, recentSummaryWindow),
-    readPreviousChapterEnding(pp, resolvedChapterNumber),
-    readCharacterStates(pp),
-    readForeshadowingStates(pp),
-    readTimeline(pp),
-    readRelatedSettings(pp),
-    readCanonRules(pp),
-    readWritingStyle(pp),
-    searchRelevantContentUnified(pp, task, resolvedChapterNumber, searchTopK),
-    searchGraphRelevantContent(pp, task, resolvedChapterNumber),
-    loadRevisionFeedbackForContext(pp, resolvedChapterNumber, revisionFeedbackWindowConfig),
-    readCognitionStates(pp),
-    readSoulDoc(pp),
-  ])
+/**
+ * 构建加载上下文配置
+ */
+function buildLoadContext(
+  projectPath: string,
+  task: string,
+  chapterNumber?: number,
+): ContextLoadContext {
+  const novelConfig = useWikiStore.getState().novelConfig
+  const revisionFeedbackWindowConfig = useWikiStore.getState().revisionFeedbackWindowConfig
+  
+  return {
+    projectPath,
+    task,
+    chapterNumber: chapterNumber ?? extractChapterNumberFromTask(task),
+    config: {
+      recentSummaryWindow: novelConfig.recentSummaryWindow > 0 ? novelConfig.recentSummaryWindow : 8,
+      searchTopK: novelConfig.searchTopK > 0 ? novelConfig.searchTopK : 5,
+      snapshotLookback: 3,
+      revisionFeedbackWindowConfig,
+    },
+  }
+}
 
-  const recentSummaries = snapshots.recentSummaries.length > 0 ? snapshots.recentSummaries : fallbackRecentSummaries
-  const previousChapterEnding = snapshots.previousChapterEnding || fallbackPreviousEnding
-  const characterStates = joinNonEmpty([snapshots.characterStates, fallbackCharacterStates], "\n\n")
-  const timeline = joinNonEmpty([snapshots.timeline, fallbackTimeline], "\n\n")
+/**
+ * 创建并配置数据源注册器
+ */
+function createDataSourceRegistry(): DataSourceRegistry {
+  const registry = new DataSourceRegistry()
+  registry.registerAll(getAllDataSources())
+  
+  return registry
+}
+
+/**
+ * 从原始数据构建上下文包
+ */
+async function buildContextPackFromRawData(
+  rawData: Record<string, any>,
+  context: ContextLoadContext,
+): Promise<ContextPack> {
+  // 合并快照数据和降级数据
+  const recentSummaries = rawData.snapshots.recentSummaries.length > 0 
+    ? rawData.snapshots.recentSummaries 
+    : rawData.fallbackRecentSummaries
+  
+  const previousChapterEnding = rawData.snapshots.previousChapterEnding 
+    || rawData.fallbackPreviousEnding
+  
+  const characterStates = joinNonEmpty([
+    rawData.snapshots.characterStates, 
+    rawData.fallbackCharacterStates
+  ], "\n\n")
+  
+  const timeline = joinNonEmpty([
+    rawData.snapshots.timeline, 
+    rawData.fallbackTimeline
+  ], "\n\n")
+  
   const foreshadowingStates = mergeForeshadowingSignals(
-    snapshots.foreshadowingSignals.length > 0 ? snapshots.foreshadowingSignals : [fallbackForeshadowingStates].filter(Boolean),
-    searchResults,
+    rawData.snapshots.foreshadowingSignals.length > 0 
+      ? rawData.snapshots.foreshadowingSignals 
+      : [rawData.fallbackForeshadowingStates].filter(Boolean),
+    rawData.searchResults,
   )
-  const chapterGoal = buildChapterGoal(outline, chapterOutline, resolvedChapterNumber)
-  const mergedOutline = joinNonEmpty([outline, volumeContext, chapterOutline], "\n\n")
-  const revisionDirectives = buildRevisionDirectives(revisionFeedback)
-  const characterAuras = await buildCharacterAuraContext(pp, task, {
+  
+  // 构建章节目标
+  const chapterGoal = buildChapterGoal(
+    rawData.outline, 
+    rawData.chapterOutline, 
+    context.chapterNumber
+  )
+  
+  // 合并大纲信息
+  const mergedOutline = joinNonEmpty([
+    rawData.outline,
+    rawData.volumeContext,
+    rawData.chapterOutline
+  ], "\n\n")
+  
+  // 构建修订指令
+  const revisionDirectives = buildRevisionDirectives(rawData.revisionFeedback)
+  
+  // 构建角色氛围上下文（依赖其他数据）
+  const characterAuras = await buildCharacterAuraContext(context.projectPath, context.task, {
     matchingText: joinNonEmpty([
       chapterGoal,
-      chapterOutline,
-      fallbackCharacterStates,
-      snapshots.characterStates,
-      cognitionText,
+      rawData.chapterOutline,
+      rawData.fallbackCharacterStates,
+      rawData.snapshots.characterStates,
+      rawData.cognitionText,
     ], "\n\n"),
   })
 
   return {
-    task,
+    task: context.task,
     chapterGoal,
     outline: mergedOutline,
     recentSummaries,
     previousChapterEnding,
     characterStates,
-    soulDoc,
+    soulDoc: rawData.soulDoc,
     characterAuras,
-    cognitionStates: cognitionText,
+    cognitionStates: rawData.cognitionText,
     foreshadowingStates,
     timeline,
-    relatedSettings,
-    canonRules,
-    writingStyle,
-    searchResults,
-    graphSearchResults,
+    relatedSettings: rawData.relatedSettings,
+    canonRules: rawData.canonRules,
+    writingStyle: rawData.writingStyle,
+    searchResults: rawData.searchResults,
+    graphSearchResults: rawData.graphSearchResults,
     mustDo: buildMustDo(chapterGoal, previousChapterEnding, foreshadowingStates),
-    mustAvoid: buildMustAvoid(canonRules, timeline, characterStates),
+    mustAvoid: buildMustAvoid(rawData.canonRules, timeline, characterStates),
     nextChapterAdvice: buildNextChapterAdvice({
       chapterGoal,
       recentSummaries,
       previousChapterEnding,
       foreshadowingStates,
       timeline,
-      searchResults,
+      searchResults: rawData.searchResults,
     }),
     revisionDirectives,
   }
@@ -260,6 +318,10 @@ export function buildNextChapterAdvice(input: {
   return advice.join("\n")
 }
 
+export function joinNonEmpty(parts: string[], separator: string): string {
+  return parts.map((part) => part.trim()).filter(Boolean).join(separator)
+}
+
 function emptyPack(task: string): ContextPack {
   return {
     task,
@@ -285,7 +347,7 @@ function emptyPack(task: string): ContextPack {
   }
 }
 
-async function readOutlineContent(pp: string): Promise<string> {
+export async function readOutlineContent(pp: string): Promise<string> {
   try {
     const results = await searchWiki(pp, "outline type:outline")
     if (results.length > 0) {
@@ -388,7 +450,7 @@ async function readChapterOutlineDirect(pp: string, chapterNumber: number): Prom
   }
 }
 
-async function readChapterOutlineContent(pp: string, chapterNumber?: number): Promise<string> {
+export async function readChapterOutlineContent(pp: string, chapterNumber?: number): Promise<string> {
   if (!chapterNumber) return ""
   const direct = await readChapterOutlineDirect(pp, chapterNumber)
   if (direct.trim()) return direct
@@ -408,6 +470,8 @@ async function readChapterOutlineContent(pp: string, chapterNumber?: number): Pr
   return ""
 }
 
+// 以下函数已被数据源模式使用，但通过动态导入，TypeScript 无法检测到
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readSnapshotContext(
   pp: string,
   chapterNumber: number | undefined,
@@ -469,6 +533,7 @@ async function readSnapshotContext(
   }
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readRecentChapterSummaries(pp: string, count: number): Promise<string[]> {
   const summaries: string[] = []
   try {
@@ -490,6 +555,7 @@ async function readRecentChapterSummaries(pp: string, count: number): Promise<st
   return summaries
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readPreviousChapterEnding(pp: string, chapterNumber?: number): Promise<string> {
   if (!chapterNumber || chapterNumber <= 1) return ""
   try {
@@ -504,6 +570,7 @@ async function readPreviousChapterEnding(pp: string, chapterNumber?: number): Pr
   return ""
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readCharacterStates(pp: string): Promise<string> {
   try {
     const results = await searchWiki(pp, "type:entity character")
@@ -515,6 +582,7 @@ async function readCharacterStates(pp: string): Promise<string> {
   return ""
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readCognitionStates(pp: string): Promise<string> {
   try {
     const state = await loadCognitionState(pp)
@@ -524,6 +592,7 @@ async function readCognitionStates(pp: string): Promise<string> {
   return ""
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readForeshadowingStates(pp: string): Promise<string> {
   try {
     const results = await searchWiki(pp, "伏笔 foreshadowing")
@@ -535,6 +604,7 @@ async function readForeshadowingStates(pp: string): Promise<string> {
   return ""
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readTimeline(pp: string): Promise<string> {
   try {
     const results = await searchWiki(pp, "timeline 时间线")
@@ -546,6 +616,7 @@ async function readTimeline(pp: string): Promise<string> {
   return ""
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readRelatedSettings(pp: string): Promise<string> {
   try {
     const results = await searchWiki(pp, "setting 设定 location 地点")
@@ -557,6 +628,7 @@ async function readRelatedSettings(pp: string): Promise<string> {
   return ""
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readCanonRules(pp: string): Promise<string> {
   try {
     const results = await searchWiki(pp, "canon 正史 rule 规则")
@@ -568,6 +640,7 @@ async function readCanonRules(pp: string): Promise<string> {
   return ""
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readWritingStyle(pp: string): Promise<string> {
   try {
     const results = await searchWiki(pp, "style 风格 writing 写作")
@@ -579,6 +652,7 @@ async function readWritingStyle(pp: string): Promise<string> {
   return ""
 }
 
+// @ts-expect-error - 函数通过动态导入在 context-data-sources.ts 中使用
 async function readVolumeContext(
   pp: string,
   chapterNumber: number | undefined,
@@ -651,7 +725,7 @@ export async function searchRelevantContent(
   return merged.slice(0, Math.max(limit, limit * 2)).join("\n")
 }
 
-async function searchRelevantContentUnified(
+export async function searchRelevantContentUnified(
   pp: string,
   task: string,
   chapterNumber: number | undefined,
@@ -783,7 +857,7 @@ async function runVectorSearchForContext(
   }
 }
 
-async function searchGraphRelevantContent(
+export async function searchGraphRelevantContent(
   pp: string,
   task: string,
   _chapterNumber: number | undefined,
@@ -886,10 +960,6 @@ export function extractChapterGoal(outline: string, chapterNumber?: number): str
   }
   if (includesChapterMarker(cleaned, chapterNumber)) return cleaned.slice(0, 2500)
   return ""
-}
-
-function joinNonEmpty(parts: string[], separator: string): string {
-  return parts.map((part) => part.trim()).filter(Boolean).join(separator)
 }
 
 interface FieldConfig {

@@ -605,6 +605,13 @@ async function optimizeChapterLengthStrict(
       `阶段4字数优化已连续尝试 ${DEEP_CHAPTER_LENGTH_OPTIMIZATION_MAX_ATTEMPTS} 次，正文仍超过 ${DEEP_CHAPTER_REWRITE_MAX_CHARS} 字，已终止。请降低本章目标字数或拆成两章生成。`,
     )
   }
+  if (finalChars > DEEP_CHAPTER_OPTIMIZED_MAX_CHARS) {
+    callbacks.onThinking?.(formatStageThinking(
+      stageTitle,
+      `阶段4字数优化已连续尝试 ${DEEP_CHAPTER_LENGTH_OPTIMIZATION_MAX_ATTEMPTS} 次，正文仍约 ${finalChars} 字；未能压缩到 ${DEEP_CHAPTER_OPTIMIZED_MIN_CHARS}-${DEEP_CHAPTER_OPTIMIZED_MAX_CHARS} 字，但仍未超过 ${DEEP_CHAPTER_REWRITE_MAX_CHARS} 字上限，已保留当前较长正文继续后续审稿，避免反复优化导致流程中断。`,
+    ))
+    return content
+  }
   throw new Error(
     `阶段4字数优化已连续尝试 ${DEEP_CHAPTER_LENGTH_OPTIMIZATION_MAX_ATTEMPTS} 次，正文仍未控制在 ${DEEP_CHAPTER_OPTIMIZED_MIN_CHARS}-${DEEP_CHAPTER_OPTIMIZED_MAX_CHARS} 字，已终止。请降低本章目标字数或拆成两章生成。`,
   )

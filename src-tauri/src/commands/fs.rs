@@ -106,6 +106,7 @@ pub async fn read_file(path: String) -> Result<String, String> {
                     Ok(format!("[Document: {} — text extraction not supported for .{} format]",
                         p.file_name().unwrap_or_default().to_string_lossy(), e))
                 }
+                e if is_plain_text_ext(e) => read_plain_text_file(&path),
                 _ => {
                     match fs::read_to_string(&path) {
                         Ok(content) => Ok(content),
@@ -146,6 +147,7 @@ pub async fn preprocess_file(path: String) -> Result<String, String> {
             let text = match ext.as_str() {
                 "pdf" => extract_pdf_text(&path)?,
                 e if OFFICE_EXTS.contains(&e) => extract_office_text(&path, e)?,
+                e if is_plain_text_ext(e) => read_plain_text_file(&path)?,
                 _ => return Ok("no preprocessing needed".to_string()),
             };
 
@@ -155,6 +157,31 @@ pub async fn preprocess_file(path: String) -> Result<String, String> {
     })
     .await
     .map_err(|e| format!("preprocess_file blocking task join error: {e}"))?
+}
+
+fn is_plain_text_ext(ext: &str) -> bool {
+    matches!(ext, "txt" | "md" | "mdx")
+}
+
+fn read_plain_text_file(path: &str) -> Result<String, String> {
+    let bytes = fs::read(path)
+        .map_err(|e| format!("Failed to read text file '{}': {}", path, e))?;
+    Ok(decode_plain_text_bytes(&bytes))
+}
+
+fn decode_plain_text_bytes(bytes: &[u8]) -> String {
+    if let Some(stripped) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        if let Ok(text) = String::from_utf8(stripped.to_vec()) {
+            return text;
+        }
+    }
+
+    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+        return text;
+    }
+
+    let (gbk_text, _, _) = encoding_rs::GBK.decode(bytes);
+    gbk_text.into_owned()
 }
 
 fn cache_path_for(original: &Path) -> std::path::PathBuf {
@@ -1647,6 +1674,40 @@ mod tests {
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(bytes).unwrap();
         path.to_string_lossy().to_string()
+    }
+
+    fn tmp_text_with_bytes(ext: &str, bytes: &[u8]) -> String {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "qmai-text-{}.{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            ext
+        ));
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(bytes).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn decode_plain_text_bytes_supports_gbk_chinese_novel_text() {
+        let (bytes, _, _) = encoding_rs::GBK.encode("第1章 税银案\n许七安醒来。");
+        let decoded = decode_plain_text_bytes(bytes.as_ref());
+
+        assert!(decoded.contains("第1章 税银案"));
+        assert!(decoded.contains("许七安醒来"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preprocess_file_returns_text_content_for_txt_books() {
+        let path = tmp_text_with_bytes("txt", "第1章 税银案\n正文".as_bytes());
+        let result = preprocess_file(path.clone()).await.unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert!(result.contains("第1章 税银案"));
+        assert_ne!(result, "no preprocessing needed");
     }
 
     /// Verify read_file does NOT crash the test process on malformed PDFs.

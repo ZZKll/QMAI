@@ -6,13 +6,14 @@ export const DEEP_CHAPTER_MIN_CHARS = 2200
 export const DEEP_CHAPTER_LENGTH_RANGE = "2200-3200 字"
 export const DEEP_CHAPTER_OPTIMIZED_MIN_CHARS = 2200
 export const DEEP_CHAPTER_OPTIMIZED_MAX_CHARS = 3200
-export const DEEP_CHAPTER_REWRITE_MAX_CHARS = 4000
+export const DEEP_CHAPTER_DRAFT_MAX_CHARS = 3500
+export const DEEP_CHAPTER_REWRITE_MAX_CHARS = 6000
 export const DEEP_CHAPTER_HARD_MAX_CHARS = 6000
 export const DEEP_CHAPTER_LENGTH_OPTIMIZATION_MAX_ATTEMPTS = 4
 export const DEEP_CHAPTER_MAX_OUTPUT_TOKENS = 8000
 
 function chapterLengthBoundary(): string {
-  return `最终正文必须控制在 ${DEEP_CHAPTER_LENGTH_RANGE}；低于 ${DEEP_CHAPTER_OPTIMIZED_MIN_CHARS} 字视为未完成；超过 ${DEEP_CHAPTER_OPTIMIZED_MAX_CHARS} 字会进入阶段4优化；阶段3初稿最多 ${DEEP_CHAPTER_HARD_MAX_CHARS} 字。`
+  return `最终正文必须控制在 ${DEEP_CHAPTER_LENGTH_RANGE}；低于 ${DEEP_CHAPTER_OPTIMIZED_MIN_CHARS} 字视为未完成；超过 ${DEEP_CHAPTER_OPTIMIZED_MAX_CHARS} 字会进入阶段4优化；全文最长上限 ${DEEP_CHAPTER_HARD_MAX_CHARS} 字。`
 }
 
 export function buildDeepChapterBriefPrompt(
@@ -57,7 +58,7 @@ export function buildDeepChapterDraftPrompt(
     "2. 不要输出分析、任务书、审稿说明、引用来源或后续建议。",
     "3. 严格承接上一章结尾，遵守大纲、记忆、人设、伏笔和时间线。",
     "4. 结尾必须留下适合下一章继续推进的钩子。",
-    `5. 字数必须接近完整章节长度：${chapterLengthBoundary()}不能提前收尾，也不能为了补细节新增额外场景。`,
+    `5. 字数必须接近完整章节长度：${chapterLengthBoundary()}阶段3正文草稿最多 ${DEEP_CHAPTER_DRAFT_MAX_CHARS} 字，写到完整结尾后立即停止；不能提前收尾，也不能为了补细节新增额外场景。`,
     "6. 必须写成完整章节，不要只写一个片段；需要包含场景铺陈、行动推进、对话交锋、情绪变化、冲突升级和结尾钩子。",
     "7. 禁止复读、循环输出、重复同一段落或用相同句式堆字数；写到完整结尾后立即停止。",
     "",

@@ -16,6 +16,11 @@ import { resolveUserVisibleReasoning } from "@/lib/user-visible-reasoning"
 import { runDeepOutlineGeneration } from "@/lib/novel/deep-outline-generation"
 import { createDeepThinkingStreamRenderer } from "@/lib/deep-thinking-stream"
 import { ChatInput } from "@/components/chat/chat-input"
+import {
+  buildWebResearchContext,
+  collectWebResearch,
+  shouldUseWebResearch,
+} from "@/lib/web-research"
 
 async function loadOutlineContext(projectPath: string): Promise<{ context: string; sources: string[] }> {
   const pp = normalizePath(projectPath)
@@ -267,6 +272,21 @@ export function OutlineChatPanel({ onClose }: { onClose: () => void }) {
 
     try {
       const { context, sources } = await loadOutlineContext(project.path)
+      let outlineContext = context
+      let outlineSources = [...sources]
+      if (shouldUseWebResearch(prompt)) {
+        const webResearch = await collectWebResearch({
+          text: prompt,
+          searchApiConfig: useWikiStore.getState().searchApiConfig,
+          maxSearchResults: 5,
+          maxImportedDocuments: 4,
+        })
+        const webResearchContext = buildWebResearchContext(webResearch)
+        if (webResearchContext.markdown.trim()) {
+          outlineContext = [outlineContext, webResearchContext.markdown].filter(Boolean).join("\n\n---\n\n")
+        }
+        outlineSources = [...outlineSources, ...webResearchContext.sources]
+      }
       const allMsgs = [...(useOutlineChatStore.getState().conversations.find(c => c.id === convId)?.messages ?? [])]
 
       // Agent mode: detect edit intent and add file edit instructions
@@ -298,10 +318,10 @@ export function OutlineChatPanel({ onClose }: { onClose: () => void }) {
       abortRef.current = controller
 
       // Add placeholder assistant message
-      addMessage(convId, { id: crypto.randomUUID(), role: "assistant", content: "", sources })
+      addMessage(convId, { id: crypto.randomUUID(), role: "assistant", content: "", sources: outlineSources })
 
       if (hasEditIntent) {
-        const systemPrompt = `你是一个专业的小说大纲编辑助手。以下是当前小说的大纲和章节内容，请根据用户的问题进行大纲相关的讨论和创作。\n\n${context}${agentSuffix}${fileListStr}`
+        const systemPrompt = `你是一个专业的小说大纲编辑助手。以下是当前小说的大纲、章节内容和用户明确要求检索的网页资料，请根据用户的问题进行大纲相关的讨论和创作。\n\n${outlineContext}${agentSuffix}${fileListStr}`
         const chatMessages: ChatMessage[] = [
           { role: "system", content: systemPrompt },
           ...historyMessages,
@@ -340,7 +360,7 @@ export function OutlineChatPanel({ onClose }: { onClose: () => void }) {
           {
             llmConfig,
             userRequest: prompt,
-            context,
+            context: outlineContext,
             historyMessages,
           },
           {
@@ -352,7 +372,7 @@ export function OutlineChatPanel({ onClose }: { onClose: () => void }) {
         )
       }
 
-      replaceLastAssistant(convId, result, sources)
+      replaceLastAssistant(convId, result, outlineSources)
       setStreamingContent("")
     } catch {
       // If aborted, keep partial content

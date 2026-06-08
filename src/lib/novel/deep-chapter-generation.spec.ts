@@ -13,6 +13,8 @@ import {
   buildDeepChapterBriefPrompt,
   buildDeepChapterDraftPrompt,
   buildDeepChapterRevisionPrompt,
+  DEEP_CHAPTER_DRAFT_MAX_CHARS,
+  DEEP_CHAPTER_HARD_MAX_CHARS,
   DEEP_CHAPTER_MIN_CHARS,
   DEEP_CHAPTER_REWRITE_MAX_CHARS,
 } from "./deep-chapter-prompts"
@@ -118,6 +120,7 @@ describe("runDeepChapterGeneration", () => {
       expect(prompt).toContain("2200-3200 字")
       expect(prompt).toContain("6000 字")
     }
+    expect(prompts[1]).toContain(`阶段3正文草稿最多 ${DEEP_CHAPTER_DRAFT_MAX_CHARS} 字`)
   })
 
   it("only enables deep generation for write-chapter routes when the switch is on", () => {
@@ -380,15 +383,18 @@ describe("runDeepChapterGeneration", () => {
     expect(thinking.join("\n")).toContain("2200-3200")
   })
 
-  it("stops after four failed stage 4 length optimizations when output remains above 4000 chars", async () => {
+  it("continues after four failed stage 4 length optimizations when output stays within 6000 chars", async () => {
     const draft = chapterText("阶段3超长初稿", 5500)
+    const acceptedLongDraft = chapterText("第4次优化仍超长", 4050)
+    const finalPolished = chapterText("最终去AI味正文", 3000)
     const responses = [
       "写作任务书内容",
       draft,
       chapterText("第1次优化仍超长", 4500),
       chapterText("第2次优化仍超长", 4300),
       chapterText("第3次优化仍超长", 4100),
-      chapterText("第4次优化仍超长", 4050),
+      acceptedLongDraft,
+      finalPolished,
     ]
     const deps: DeepChapterGenerationDeps = {
       buildContextPack: vi.fn(async () => contextPack),
@@ -399,15 +405,18 @@ describe("runDeepChapterGeneration", () => {
         callbacks.onDone()
       }),
     }
+    const thinking: string[] = []
 
-    await expect(runDeepChapterGeneration(
+    const result = await runDeepChapterGeneration(
       { projectPath: "E:/Novel", userRequest: "生成第3章", chapterNumber: 3, llmConfig },
-      {},
+      { onThinking: (content) => thinking.push(content) },
       deps,
-    )).rejects.toThrow("阶段4字数优化已连续尝试 4 次")
+    )
 
-    expect(deps.reviewChapter).not.toHaveBeenCalled()
-    expect(deps.streamChat).toHaveBeenCalledTimes(6)
+    expect(result.finalContent).toBe(finalPolished)
+    expect(deps.reviewChapter).toHaveBeenCalledWith("E:/Novel", acceptedLongDraft, 3)
+    expect(deps.streamChat).toHaveBeenCalledTimes(7)
+    expect(thinking.join("\n")).toContain(`未能压缩到 2200-3200 字，但仍未超过 ${DEEP_CHAPTER_HARD_MAX_CHARS} 字上限`)
   })
 
   it("checks final polish length and returns to stage 3 when the stage 6 result is too long", async () => {

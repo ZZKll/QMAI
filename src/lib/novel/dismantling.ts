@@ -49,6 +49,8 @@ const DEFAULT_LIBRARY: DismantlingLibrary = {
   selectedProjectId: null,
 }
 
+export const DISMANTLING_NO_PREPROCESSING_NEEDED = "no preprocessing needed"
+
 export function getDismantlingLibraryPath(projectPath: string): string {
   return `${normalizePath(projectPath)}/.qmai/dismantling/library.json`
 }
@@ -74,12 +76,41 @@ export async function saveDismantlingLibrary(projectPath: string, library: Disma
 }
 
 export function normalizeDismantlingLibrary(input: Partial<DismantlingLibrary> | null | undefined): DismantlingLibrary {
-  const projects = Array.isArray(input?.projects) ? input.projects.map(normalizeDismantlingProject).filter(Boolean) : []
+  const projects = dedupeDismantlingProjects(
+    Array.isArray(input?.projects) ? input.projects.map(normalizeDismantlingProject).filter(Boolean) : [],
+  )
+  const selectedProjectId = projects.some((project) => project.id === input?.selectedProjectId)
+    ? input?.selectedProjectId
+    : projects[0]?.id ?? null
   return {
     version: 1,
     projects,
-    selectedProjectId: input?.selectedProjectId ?? projects[0]?.id ?? null,
+    selectedProjectId,
   }
+}
+
+export function normalizeDismantlingProjectTitle(title: string): string {
+  return title
+    .normalize("NFKC")
+    .trim()
+    .replace(/\.(txt|md|mdx|doc|docx)$/i, "")
+    .replace(/\s+/g, "")
+    .toLowerCase()
+}
+
+export function shouldReadDismantlingOriginalFile(preprocessedText: string): boolean {
+  return preprocessedText.trim().toLowerCase() === DISMANTLING_NO_PREPROCESSING_NEEDED
+}
+
+function dedupeDismantlingProjects(projects: DismantlingProject[]): DismantlingProject[] {
+  const seen = new Set<string>()
+  return projects.filter((project) => {
+    const key = normalizeDismantlingProjectTitle(project.title)
+    if (!key) return true
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 function normalizeDismantlingProject(input: Partial<DismantlingProject> | null | undefined): DismantlingProject {
@@ -125,11 +156,15 @@ function normalizeDismantlingAnalysis(input: Partial<DismantlingAnalysis>): Dism
 }
 
 export function splitDismantlingTextIntoChapters(text: string): DismantlingChapter[] {
-  const normalized = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").trim()
+  const normalized = text
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n/g, "\n")
+    .normalize("NFKC")
+    .replace(/\u3000/g, " ")
+    .trim()
   if (!normalized) return []
 
-  const headingPattern = /^(?:#{1,3}\s*)?(第\s*(?:\d+|[零〇一二三四五六七八九十百千万两]+)\s*[章节卷回][^\n]*|chapter\s*\d+[^\n]*)$/gim
-  const matches = [...normalized.matchAll(headingPattern)]
+  const matches = collectDismantlingChapterStarts(normalized)
   if (matches.length === 0) {
     return [{
       id: "chapter-001",
@@ -141,16 +176,16 @@ export function splitDismantlingTextIntoChapters(text: string): DismantlingChapt
   }
 
   return matches.map((match, index) => {
-    const start = match.index ?? 0
+    const start = match.index
     const nextStart = matches[index + 1]?.index ?? normalized.length
     const raw = normalized.slice(start, nextStart).trim()
-    const [titleLine = `第${index + 1}章`, ...bodyLines] = raw.split("\n")
-    const chapterNumber = extractDismantlingChapterNumber(titleLine) ?? index + 1
+    const { title, content } = splitDismantlingChapterSegment(raw, index + 1)
+    const chapterNumber = extractDismantlingChapterNumber(title) ?? index + 1
     return {
       id: `chapter-${String(chapterNumber).padStart(3, "0")}`,
       chapterNumber,
-      title: titleLine.replace(/^#{1,3}\s*/, "").trim(),
-      content: bodyLines.join("\n").trim(),
+      title,
+      content,
       status: "pending",
     }
   })
@@ -158,10 +193,70 @@ export function splitDismantlingTextIntoChapters(text: string): DismantlingChapt
 
 export function extractDismantlingChapterNumber(value: string): number | null {
   const normalized = value.normalize("NFKC")
-  const digit = normalized.match(/(?:第|chapter\s*)\s*0*(\d+)/i)?.[1]
-  if (digit) return Number.parseInt(digit, 10)
-  const chinese = normalized.match(/第\s*([零〇一二三四五六七八九十百千万两]+)\s*[章节卷回]/)?.[1]
+  const digitMatches = [...normalized.matchAll(/(?:第\s*0*(\d+)\s*[章节回]|chapter\s*0*(\d+))/gi)]
+  const digit = digitMatches[digitMatches.length - 1]
+  if (digit) return Number.parseInt(digit[1] ?? digit[2], 10)
+  const chineseMatches = [...normalized.matchAll(/第\s*([零〇一二三四五六七八九十百千万两]+)\s*[章节回]/g)]
+  const chinese = chineseMatches[chineseMatches.length - 1]?.[1]
   return chinese ? parseChineseNumber(chinese) : null
+}
+
+function createDismantlingChapterHeadingPattern(): RegExp {
+  const chineseNumber = "零〇一二三四五六七八九十百千万两"
+  const chapterNumber = `(?:\\d+|[${chineseNumber}]+)`
+  const chapterMarker = `第\\s*${chapterNumber}\\s*[章节回]`
+  const volumePrefix = `(?:(?:正文卷|第\\s*${chapterNumber}\\s*卷|[^\\n]{1,24}卷)[^\\n]{0,32}?)`
+  return new RegExp(`^[ \\t]*(?:#{1,3}[ \\t]*)?(?:${volumePrefix}[ \\t]*)?(?:${chapterMarker}[^\\n]*|chapter[ \\t]*\\d+[^\\n]*)$`, "gim")
+}
+
+function collectDismantlingChapterStarts(text: string): { index: number }[] {
+  const lineMatches = [...text.matchAll(createDismantlingChapterHeadingPattern())]
+    .map((match) => ({ index: match.index ?? 0 }))
+  const inlineMatches = [...text.matchAll(createDismantlingInlineChapterPattern())]
+    .map((match) => ({ index: (match.index ?? 0) + (match[1]?.length ?? 0) }))
+  return inlineMatches.length > lineMatches.length ? inlineMatches : lineMatches
+}
+
+function createDismantlingInlineChapterPattern(): RegExp {
+  const chineseNumber = "零〇一二三四五六七八九十百千万两"
+  const chapterNumber = `(?:\\d+|[${chineseNumber}]+)`
+  const chapterMarker = `第\\s*${chapterNumber}\\s*[章节回]`
+  const volumePrefix = `(?:(?:正文卷|第\\s*${chapterNumber}\\s*卷|[^。！？!?\\n]{1,24}卷)[^。！？!?\\n]{0,32}?)`
+  return new RegExp(`(^|\\n|\\s{2,})((?:#{1,3}[ \\t]*)?(?:${volumePrefix}[ \\t]*)?(?:${chapterMarker}|chapter[ \\t]*\\d+))`, "gim")
+}
+
+function splitDismantlingChapterSegment(raw: string, fallbackNumber: number): { title: string; content: string } {
+  const [firstLine = `第${fallbackNumber}章`, ...bodyLines] = raw.split("\n")
+  const cleanedFirstLine = cleanDismantlingChapterTitle(firstLine)
+  if (bodyLines.length > 0 && cleanedFirstLine.length <= 100) {
+    return {
+      title: cleanedFirstLine,
+      content: bodyLines.join("\n").trim(),
+    }
+  }
+  return splitInlineDismantlingChapter(raw, fallbackNumber)
+}
+
+function splitInlineDismantlingChapter(raw: string, fallbackNumber: number): { title: string; content: string } {
+  const cleaned = cleanDismantlingChapterTitle(raw)
+  const markerMatch = cleaned.match(/^(.*?(?:第\s*(?:\d+|[零〇一二三四五六七八九十百千万两]+)\s*[章节回]|chapter\s*\d+))/i)
+  const marker = markerMatch?.[1]?.trim() || `第${fallbackNumber}章`
+  const afterMarker = cleaned.slice(marker.length).trim()
+  const beforePunctuation = afterMarker.split(/[。！？!?]/)[0]?.trim() ?? ""
+  const titleTail = beforePunctuation.split(/\s+/)[0]?.trim() ?? ""
+  const title = [marker, titleTail].filter(Boolean).join(" ")
+  const contentStart = Math.min(cleaned.length, title.length)
+  return {
+    title,
+    content: cleaned.slice(contentStart).trim(),
+  }
+}
+
+function cleanDismantlingChapterTitle(value: string): string {
+  return value
+    .replace(/^\s*#{1,3}\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim()
 }
 
 function parseChineseNumber(value: string): number | null {
@@ -237,6 +332,34 @@ export function buildDismantlingAnalysisPrompt(input: {
   ].join("\n")
 }
 
+export function buildDismantlingWebResearchPrompt(input: {
+  projectTitle: string
+  userRequest: string
+  webResearchContext: string
+}): string {
+  return [
+    "你是小说拆文与市场趋势分析助手。请基于用户指定的网页资料或联网搜索资料，输出网页热门分析。",
+    "",
+    "重要边界：",
+    "- 本结果只写入独立拆文记忆库，不要写入当前小说事实、章节记忆或大纲记忆。",
+    "- 只能提炼题材趋势、开篇结构、卖点、爽点、冲突推进、读者期待和可复用写法。",
+    "- 不要复述网页大段原文，不要复制原作人物、设定、剧情和具体表达。",
+    "- 如果网页资料不足，请直接说明资料不足，并列出还需要补充的资料方向。",
+    "",
+    `拆文作品：${input.projectTitle}`,
+    `用户要求：${input.userRequest}`,
+    "",
+    input.webResearchContext,
+    "",
+    "请按以下 Markdown 结构输出：",
+    "## 网页热门分析",
+    "## 题材与卖点趋势",
+    "## 开篇与章节节奏",
+    "## 冲突、爽点与钩子",
+    "## 可复用结构记忆",
+  ].join("\n")
+}
+
 export function extractStructureMemoryFromAnalysis(markdown: string): string[] {
   const sectionMatch = markdown.match(/##\s*可复用结构记忆\s*\n([\s\S]*)$/)
   const raw = sectionMatch?.[1] ?? markdown
@@ -265,4 +388,3 @@ export function buildDismantlingReferenceDirective(input: {
     ...input.structureMemory.map((item) => `- ${item}`),
   ].join("\n")
 }
-

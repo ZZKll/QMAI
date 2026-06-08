@@ -7,6 +7,42 @@ export interface ChangelogEntry {
   }
 }
 
+const TWO_POINT_TWO_EIGHT_CHANGELOG: ChangelogEntry = {
+  version: "2.2.8",
+  date: "2026-06-08",
+  highlights: {
+    en: [
+      "Synced the accepted PR fixes while keeping review-context retrieval complete; review still uses vector search, graph search, and reranking.",
+      "Fixed review history chapter attribution so selected chapter file names take priority over stale frontmatter chapter numbers.",
+      "Improved review streaming updates to reduce UI refresh pressure without reducing the amount of memory material used for review.",
+      "Improved graph cache isolation so different projects no longer share retrieval graphs when they have the same data version.",
+      "Made local mock tests ignore the .codex-temp review snapshot directory so standard verification only scans this project source.",
+    ],
+    zh: [
+      "同步已确认可以接受的 PR 修复，同时保留完整审稿上下文检索；审稿仍会使用向量检索、图谱检索和重排序。",
+      "修复审稿历史章节归属：优先使用当前选中的章节文件名，避免旧 frontmatter 章节号把审稿记录挂错章节。",
+      "优化审稿流式输出刷新，降低界面频繁更新带来的卡顿，但不减少审稿可读取的记忆资料。",
+      "优化图谱缓存隔离，不同项目即使 dataVersion 相同，也不会复用彼此的检索图谱。",
+      "本地 mock 测试会忽略 .codex-temp 评审快照目录，避免临时 PR 代码污染项目标准验证结果。",
+    ],
+  },
+}
+
+const TWO_POINT_TWO_NINE_CHANGELOG: ChangelogEntry = {
+  version: "2.2.9",
+  date: "2026-06-08",
+  highlights: {
+    en: [
+      "Added a 3,500-character cap to the deep chapter stage 3 draft prompt so models are asked to keep the first draft under control before later review stages.",
+      "Raised the deep chapter length-rewrite failure ceiling to 6,000 characters; after four failed compression attempts, usable long chapters continue to review instead of stopping solely because they are above 3,200 characters.",
+    ],
+    zh: [
+      "AI 会话深度章节第 3 阶段新增正文草稿最多 3500 字的提示限制，先从初稿阶段减少模型无节制扩写。",
+      "AI 会话深度章节第 4 阶段控字失败保护上限调整为 6000 字；连续 4 次仍未压到 3200 字以内时，只要未超过 6000 字，会保留较长正文继续审稿，避免流程反复中断。",
+    ],
+  },
+}
+
 const TWO_POINT_TWO_SEVEN_CHANGELOG: ChangelogEntry = {
   version: "2.2.7",
   date: "2026-06-06",
@@ -878,6 +914,8 @@ export const CHANGELOG: ChangelogEntry[] = [
 ]
 
 export function currentVersionChangelog(version: string): ChangelogEntry[] {
+  if (version === TWO_POINT_TWO_NINE_CHANGELOG.version) return [TWO_POINT_TWO_NINE_CHANGELOG]
+  if (version === TWO_POINT_TWO_EIGHT_CHANGELOG.version) return [TWO_POINT_TWO_EIGHT_CHANGELOG]
   if (version === TWO_POINT_TWO_SEVEN_CHANGELOG.version) return [TWO_POINT_TWO_SEVEN_CHANGELOG]
   if (version === TWO_POINT_TWO_ZERO_CHANGELOG.version) return [TWO_POINT_TWO_ZERO_CHANGELOG]
   if (version === TWO_POINT_ONE_ZERO_CHANGELOG.version) return [TWO_POINT_ONE_ZERO_CHANGELOG]
@@ -890,6 +928,8 @@ export function currentVersionChangelog(version: string): ChangelogEntry[] {
 
 export function allChangelog(): ChangelogEntry[] {
   return [
+    TWO_POINT_TWO_NINE_CHANGELOG,
+    TWO_POINT_TWO_EIGHT_CHANGELOG,
     TWO_POINT_TWO_SEVEN_CHANGELOG,
     TWO_POINT_TWO_ZERO_CHANGELOG,
     TWO_POINT_ONE_ZERO_CHANGELOG,
