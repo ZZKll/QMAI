@@ -342,6 +342,7 @@ export const CHANGELOG: ChangelogEntry[] = [
 ]
 
 export function currentVersionChangelog(version: string): ChangelogEntry[] {
+  if (version === TWO_POINT_TWO_THIRTEEN_CHANGELOG.version) return [TWO_POINT_TWO_THIRTEEN_CHANGELOG]
   if (version === TWO_POINT_TWO_TWELVE_CHANGELOG.version) return [TWO_POINT_TWO_TWELVE_CHANGELOG]
   if (version === TWO_POINT_TWO_ELEVEN_CHANGELOG.version) return [TWO_POINT_TWO_ELEVEN_CHANGELOG]
   if (version === TWO_POINT_TWO_TEN_CHANGELOG.version) return [TWO_POINT_TWO_TEN_CHANGELOG]
@@ -351,7 +352,7 @@ export function currentVersionChangelog(version: string): ChangelogEntry[] {
   if (version === TWO_POINT_TWO_ZERO_CHANGELOG.version) return [TWO_POINT_TWO_ZERO_CHANGELOG]
   if (version === TWO_POINT_ONE_ZERO_CHANGELOG.version) return [TWO_POINT_ONE_ZERO_CHANGELOG]
   if (version === TWO_POINT_ZERO_CHANGELOG.version) return [TWO_POINT_ZERO_CHANGELOG]
-  if (/^2\.2\.(?:[1-6]|13)$/.test(version)) return []
+  if (/^2\.2\.[1-6]$/.test(version)) return []
   if (/^2\.1\.(?:[1-9]|10)$/.test(version)) return []
   if (/^2\.0\.(?:[1-9]|1[0-2])$/.test(version)) return []
   if (isMergedOnePointRelease(version)) return []

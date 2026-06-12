@@ -7,7 +7,7 @@
  * - Writing Humanizer: https://github.com/shyuan/writing-humanizer
  */
 
-export const CHINESE_NOVEL_DE_AI_RULES = `# 中文小说去AI味专业规则
+export const CHINESE_NOVEL_DE_AI_RULES = `# 中文小说去 AI 味补充规则
 
 ## 一、AI味识别清单（必须消除）
 
@@ -107,6 +107,12 @@ export const CHINESE_NOVEL_DE_AI_RULES = `# 中文小说去AI味专业规则
 3. 伏笔、章节钩子
 4. 原有对话和关键动作
 5. 不增删剧情点，只改写作方式
+
+**中文小说适配注意**：
+- 保留角色声线、对白毛边、叙事节奏和必要停顿
+- 不要按非虚构文章规则硬删副词或压缩到固定字数
+- 小说中的"似乎""仿佛""缓缓"等词在特定语境下是风格，不是AI味
+- 情感描写可以有一定修饰，不必强制精简到极致
 
 ## 五、最终检查（10项）
 

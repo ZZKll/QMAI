@@ -128,7 +128,7 @@ describe("runDeepChapterGeneration", () => {
     }
     expect(finalPolishPrompt).toContain("中文小说去 AI 味补充规则")
     expect(finalPolishPrompt).toContain("角色声线")
-    expect(finalPolishPrompt).toContain("不要按非虚构写作规则硬删副词")
+    expect(finalPolishPrompt).toContain("不要按非虚构文章规则硬删副词")
   })
 
   it("only enables deep generation for write-chapter routes when the switch is on", () => {
